@@ -1,0 +1,1 @@
+Email-form submission blocker: crawler recognized the email field but incorrectly selected a Privacy Policy anchor as the structural CTA. Preserve this state before the next form-submission fix.
