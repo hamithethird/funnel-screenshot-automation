@@ -351,25 +351,6 @@ function isPassiveTransitionScreen(text) {
     });
   }
 
-  async function capturePaywallPdf(screenNumber, paywallState) {
-    const filename = `paywall-${String(screenNumber).padStart(2, '0')}.pdf`;
-    const width = Math.max(390, Math.ceil(paywallState.documentWidth));
-    const height = Math.max(844, Math.ceil(paywallState.documentHeight));
-    await page.emulateMedia({ media: 'screen' });
-    await page.pdf({
-      path: filename,
-      printBackground: true,
-      width: `${width}px`,
-      height: `${height}px`,
-      margin: { top: '0', right: '0', bottom: '0', left: '0' },
-      pageRanges: '1'
-    });
-    console.log('Paywall detected from discounted price structure.');
-    console.log('Crossed prices:', paywallState.crossedPrices);
-    console.log('Current prices:', paywallState.currentPrices);
-    console.log(`Captured entire paywall as single-page PDF: ${filename}`);
-  }
-
   async function inspectPage() {
     return await page.evaluate(() => {
       const vw = window.innerWidth;
@@ -998,11 +979,6 @@ function isPassiveTransitionScreen(text) {
     await dismissBlockingConsentOverlay();
     const state = await inspectPage();
     const paywallState = await inspectPaywallState();
-    if (paywallState.isPagePaywall) {
-      await capturePaywallPdf(screenNumber, paywallState);
-      console.log('Stopping after paywall capture to avoid payment-loop screenshots.');
-      break;
-    }
     const filename = `${String(screenNumber).padStart(2, '0')}.png`;
     await page.screenshot({ path: filename, fullPage: true });
     console.log(`\nCaptured ${filename}`);
@@ -1011,6 +987,16 @@ function isPassiveTransitionScreen(text) {
       CTA: state.cta?.text || null,
       answerOptions: state.group.map(x => x.text)
     });
+
+    if (paywallState.isPagePaywall) {
+      console.log('Paywall detected from discounted price structure.');
+      console.log('Crossed prices:', paywallState.crossedPrices);
+      console.log('Current prices:', paywallState.currentPrices);
+      console.log(`Captured paywall as full-page PNG: ${filename}`);
+      console.log('Stopping after paywall capture to avoid payment-loop screenshots.');
+      break;
+    }
+
     const beforeSignature = pageSignature(state);
     const acted = await advanceOneScreen(state);
     if (!acted) {
