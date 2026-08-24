@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+
 function isNativeLanguageQuestion(text) {
   const normalized = (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
   const patterns = [
@@ -7,24 +8,80 @@ function isNativeLanguageQuestion(text) {
   ];
   return patterns.some(pattern => normalized.includes(pattern));
 }
+
 function choosePreferredNativeLanguage(options) {
   const normalized = options.map((option, index) => ({
     ...option,
     originalIndex: index,
     normalizedText: (option.text || '').trim().toLowerCase()
   }));
-  const englishNames = ['english','ingilizce','inglés','ingles','anglais','englisch','inglese'];
-  const spanishNames = ['spanish','español','espanol','ispanyolca','espagnol','spanisch','spagnolo'];
+  const englishNames = ['english', 'ingilizce', 'inglés', 'ingles', 'anglais', 'englisch', 'inglese'];
+  const spanishNames = ['spanish', 'español', 'espanol', 'ispanyolca', 'espagnol', 'spanisch', 'spagnolo'];
+
   const english = normalized.find(option =>
     englishNames.some(name => option.normalizedText === name || option.normalizedText.includes(name))
   );
   if (english) return { option: english, reason: 'Preferred native language: English' };
+
   const spanish = normalized.find(option =>
     spanishNames.some(name => option.normalizedText === name || option.normalizedText.includes(name))
   );
   if (spanish) return { option: spanish, reason: 'English unavailable; fallback native language: Spanish' };
+
   return null;
 }
+
+function parseNumberToken(token) {
+  const words = {
+    one: 1, two: 2, three: 3, four: 4, five: 5,
+    six: 6, seven: 7, eight: 8, nine: 9, ten: 10
+  };
+  if (/^\d+$/.test(token || '')) return Number(token);
+  return words[(token || '').toLowerCase()] || null;
+}
+
+function getSelectionInstruction(text) {
+  const normalized = (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const number = '(\\d+|one|two|three|four|five|six|seven|eight|nine|ten)';
+  let match;
+
+  match = normalized.match(new RegExp(`(?:choose|select|pick)\\s+(?:at\\s+least\\s+)?${number}\\s+(?:or\\s+more|or\\s+above|\\+)`));
+  if (match) {
+    const n = parseNumberToken(match[1]);
+    return { minSelections: n || 1, maxSelections: null, reason: match[0] };
+  }
+
+  match = normalized.match(new RegExp(`(?:at\\s+least|minimum\\s+of?)\\s+${number}`));
+  if (match) {
+    const n = parseNumberToken(match[1]);
+    return { minSelections: n || 1, maxSelections: null, reason: match[0] };
+  }
+
+  match = normalized.match(new RegExp(`${number}\\s+(?:or\\s+more|or\\s+above)`));
+  if (match) {
+    const n = parseNumberToken(match[1]);
+    return { minSelections: n || 1, maxSelections: null, reason: match[0] };
+  }
+
+  match = normalized.match(new RegExp(`(?:choose|select|pick)\\s+(?:up\\s+to|no\\s+more\\s+than|max(?:imum)?\\s+of?)\\s+${number}`));
+  if (match) {
+    const n = parseNumberToken(match[1]);
+    return { minSelections: 1, maxSelections: n || null, reason: match[0] };
+  }
+
+  match = normalized.match(new RegExp(`(?:choose|select|pick)\\s+(?:exactly\\s+)?${number}(?!\\s+(?:or|to))`));
+  if (match) {
+    const n = parseNumberToken(match[1]);
+    if (n) return { minSelections: n, maxSelections: n, reason: match[0] };
+  }
+
+  if (/\b(select all that apply|choose all that apply|select any that apply|choose any that apply)\b/.test(normalized)) {
+    return { minSelections: 1, maxSelections: null, reason: 'multi-select instruction' };
+  }
+
+  return { minSelections: 1, maxSelections: 1, reason: 'default single selection' };
+}
+
 (async () => {
   const url = process.argv[2];
   if (!url) {
@@ -71,15 +128,15 @@ function choosePreferredNativeLanguage(options) {
 
   async function dismissBlockingConsentOverlay() {
     const overlaySelectors = [
-      '[role="dialog"]','[aria-modal="true"]','.cky-modal','.cky-modal-open',
-      '[class*="cookie"]','[id*="cookie"]','[class*="consent"]','[id*="consent"]'
+      '[role="dialog"]', '[aria-modal="true"]', '.cky-modal', '.cky-modal-open',
+      '[class*="cookie"]', '[id*="cookie"]', '[class*="consent"]', '[id*="consent"]'
     ];
     const affirmativePatterns = [
-      /^accept all$/i,/^accept$/i,/^allow all$/i,/^allow$/i,/^agree$/i,/^i agree$/i,
-      /^consent$/i,/^ok$/i,/^okay$/i,/^got it$/i,/^tümünü kabul et$/i,/^kabul et$/i,
-      /^hepsini kabul et$/i,/^izin ver$/i,/^aceptar todo$/i,/^aceptar$/i,/^aceitar tudo$/i,
-      /^aceitar$/i,/^tout accepter$/i,/^accepter$/i,/^alle akzeptieren$/i,/^akzeptieren$/i,
-      /^accetta tutto$/i,/^accetta$/i
+      /^accept all$/i, /^accept$/i, /^allow all$/i, /^allow$/i, /^agree$/i, /^i agree$/i,
+      /^consent$/i, /^ok$/i, /^okay$/i, /^got it$/i, /^tümünü kabul et$/i, /^kabul et$/i,
+      /^hepsini kabul et$/i, /^izin ver$/i, /^aceptar todo$/i, /^aceptar$/i, /^aceitar tudo$/i,
+      /^aceitar$/i, /^tout accepter$/i, /^accepter$/i, /^alle akzeptieren$/i, /^akzeptieren$/i,
+      /^accetta tutto$/i, /^accetta$/i
     ];
     const overlays = page.locator(overlaySelectors.join(','));
     const overlayCount = await overlays.count();
@@ -135,11 +192,12 @@ function choosePreferredNativeLanguage(options) {
   async function handleEnglishLanguageChoice() {
     const result = await page.evaluate(() => {
       const languageNames = [
-        'english','ukrainian','українська','український','spanish','español','french','français',
-        'german','deutsch','italian','italiano','portuguese','português','turkish','türkçe','polish','polski',
-        'russian','русский','arabic','العربية','japanese','日本語','korean','한국어','chinese','中文',
-        'dutch','nederlands','swedish','svenska','norwegian','norsk','danish','dansk','finnish','suomi',
-        'czech','čeština','romanian','română','hungarian','magyar','greek','ελληνικά'
+        'english', 'ukrainian', 'українська', 'український', 'spanish', 'español', 'french', 'français',
+        'german', 'deutsch', 'italian', 'italiano', 'portuguese', 'português', 'turkish', 'türkçe',
+        'polish', 'polski', 'russian', 'русский', 'arabic', 'العربية', 'japanese', '日本語',
+        'korean', '한국어', 'chinese', '中文', 'dutch', 'nederlands', 'swedish', 'svenska',
+        'norwegian', 'norsk', 'danish', 'dansk', 'finnish', 'suomi', 'czech', 'čeština',
+        'romanian', 'română', 'hungarian', 'magyar', 'greek', 'ελληνικά'
       ];
       const normalize = value => (value || '').trim().toLowerCase().replace(/\s+/g, ' ');
       const isVisible = el => {
@@ -198,15 +256,14 @@ function choosePreferredNativeLanguage(options) {
         uniqueCards.push(item);
       }
       const distinctLanguages = new Set(uniqueCards.map(x => x.matchedLanguage));
-      const englishCandidates = uniqueCards
-        .filter(x => x.matchedLanguage === 'english')
-        .sort((a, b) => a.area - b.area);
+      const englishCandidates = uniqueCards.filter(x => x.matchedLanguage === 'english').sort((a, b) => a.area - b.area);
       if (distinctLanguages.size < 2 || englishCandidates.length === 0) return null;
       const chosen = englishCandidates[0];
       const autoId = `language-choice-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
       chosen.card.setAttribute('data-language-choice-id', autoId);
       return { value: autoId, text: chosen.text, languages: Array.from(distinctLanguages).slice(0, 10) };
     });
+
     if (!result) return false;
     console.log('Language-choice page detected. Preferring English. Languages found:', result.languages);
     const beforeState = await inspectPage();
@@ -219,20 +276,14 @@ function choosePreferredNativeLanguage(options) {
       console.log('English language selected.');
       if (afterState.cta) {
         const beforeCTA = pageSignature(afterState);
-        await safeCrawlerClick(
-          page.locator(`[data-auto-id="${afterState.cta.id}"]`),
-          afterState.cta.text || 'language-choice CTA'
-        );
+        await safeCrawlerClick(page.locator(`[data-auto-id="${afterState.cta.id}"]`), afterState.cta.text || 'language-choice CTA');
         await waitForAdvancement(beforeCTA, 7000);
       }
       return true;
     }
     afterState = await inspectPage();
     if (afterState.cta) {
-      await safeCrawlerClick(
-        page.locator(`[data-auto-id="${afterState.cta.id}"]`),
-        afterState.cta.text || 'language-choice CTA'
-      );
+      await safeCrawlerClick(page.locator(`[data-auto-id="${afterState.cta.id}"]`), afterState.cta.text || 'language-choice CTA');
       return true;
     }
     return true;
@@ -309,7 +360,8 @@ function choosePreferredNativeLanguage(options) {
       const vh = window.innerHeight;
       const all = Array.from(document.querySelectorAll('*'));
       const pageText = document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 3000);
-      const questionSignals = /\b(select all that apply|select all|select one|choose all|choose one|pick one|which|what(?:'s| is| are| do| would)|how (?:often|do|would|well|much))\b/i;
+      const questionSignals = /\b(select all that apply|choose all that apply|select any|choose any|select one|choose one|pick one|choose\s+\d+|select\s+\d+|pick\s+\d+|or more|at least|which|what(?:'s| is| are| do| would)|how (?:often|do|would|well|much))\b/i;
+      const navigationText = /^(continue|next|proceed|submit|done|finish|start|see results?|get started|create account|sign up|go on)$/i;
 
       const controls = all.map((el, index) => {
         const rect = el.getBoundingClientRect();
@@ -320,14 +372,13 @@ function choosePreferredNativeLanguage(options) {
         const visible = rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
           rect.top < vh && rect.left < vw && style.display !== 'none' &&
           style.visibility !== 'hidden' && Number(style.opacity) > 0;
-        const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true' ||
-          style.pointerEvents === 'none';
+        const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true' || style.pointerEvents === 'none';
         const editableField = tag === 'textarea' ||
-          (tag === 'input' && ['text','email','search','tel','url','password','number'].includes(inputType));
+          (tag === 'input' && ['text', 'email', 'search', 'tel', 'url', 'password', 'number'].includes(inputType));
         const answerControl = role === 'radio' || role === 'checkbox' ||
-          (tag === 'input' && ['radio','checkbox'].includes(inputType));
+          (tag === 'input' && ['radio', 'checkbox'].includes(inputType));
         const navigationControl = tag === 'button' || tag === 'a' || role === 'button' ||
-          (tag === 'input' && ['button','submit'].includes(inputType));
+          (tag === 'input' && ['button', 'submit'].includes(inputType));
         const genericClickable = !editableField &&
           (tag === 'label' || el.hasAttribute('onclick') || el.tabIndex >= 0 || style.cursor === 'pointer');
         const interactive = answerControl || navigationControl || genericClickable;
@@ -335,8 +386,7 @@ function choosePreferredNativeLanguage(options) {
         const id = `auto-${index}`;
         el.setAttribute('data-auto-id', id);
         const text = (
-          el.innerText || el.value || el.getAttribute('aria-label') ||
-          el.getAttribute('title') || el.textContent || ''
+          el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || ''
         ).trim().replace(/\s+/g, ' ').slice(0, 100);
         return {
           id,
@@ -353,13 +403,12 @@ function choosePreferredNativeLanguage(options) {
         groups.get(item.parentId).push(item);
       }
 
-      // Some funnels render each answer card in a separate wrapper, so the DOM parent
-      // is not enough. Build a synthetic group from repeated card geometry as well.
       const spatialCandidates = controls.filter(item =>
         item.text.length > 0 && item.text.length <= 100 &&
-        item.width >= vw * 0.58 && item.width <= vw * 0.98 &&
-        item.height >= 34 && item.height <= 110 &&
-        item.top >= vh * 0.16 && item.bottom <= vh * 0.82
+        !navigationText.test(item.text.trim()) &&
+        item.width >= vw * 0.20 && item.width <= vw * 0.98 &&
+        item.height >= 34 && item.height <= 180 &&
+        item.top >= vh * 0.12 && item.bottom <= vh * 0.90
       );
 
       if (spatialCandidates.length >= 3) {
@@ -367,9 +416,8 @@ function choosePreferredNativeLanguage(options) {
         for (const item of spatialCandidates) {
           let bucket = buckets.find(group => {
             const ref = group[0];
-            return Math.abs(item.left - ref.left) <= 28 &&
-              Math.abs(item.width - ref.width) <= Math.max(ref.width * 0.16, 28) &&
-              Math.abs(item.height - ref.height) <= Math.max(ref.height * 0.35, 18);
+            return Math.abs(item.width - ref.width) <= Math.max(ref.width * 0.20, 24) &&
+              Math.abs(item.height - ref.height) <= Math.max(ref.height * 0.30, 20);
           });
           if (!bucket) {
             bucket = [];
@@ -378,24 +426,24 @@ function choosePreferredNativeLanguage(options) {
           bucket.push(item);
         }
 
-        for (const bucket of buckets) {
-          if (bucket.length < 3 || bucket.length > 15) continue;
-          bucket.sort((a, b) => a.top - b.top);
-          let verticalStack = true;
-          for (let i = 1; i < bucket.length; i++) {
-            const gap = bucket[i].top - bucket[i - 1].bottom;
-            if (gap < -12 || gap > 90) {
-              verticalStack = false;
-              break;
-            }
+        for (let bucketIndex = 0; bucketIndex < buckets.length; bucketIndex++) {
+          const bucket = buckets[bucketIndex];
+          if (bucket.length < 3 || bucket.length > 24) continue;
+          const rows = [];
+          const cols = [];
+          for (const item of bucket) {
+            if (!rows.some(v => Math.abs(v - item.top) <= Math.max(item.height * 0.45, 24))) rows.push(item.top);
+            if (!cols.some(v => Math.abs(v - item.left) <= Math.max(item.width * 0.35, 26))) cols.push(item.left);
           }
-          if (verticalStack) groups.set(`spatial-${buckets.indexOf(bucket)}`, bucket);
+          const repeatedLayout = rows.length >= 2 || cols.length >= 2;
+          if (!repeatedLayout) continue;
+          groups.set(`spatial-${bucketIndex}`, bucket);
         }
       }
 
       let bestGroup = null;
       for (const items of groups.values()) {
-        if (items.length < 2 || items.length > 15) continue;
+        if (items.length < 2 || items.length > 24) continue;
         const avgWidth = items.reduce((sum, x) => sum + x.width, 0) / items.length;
         const avgHeight = items.reduce((sum, x) => sum + x.height, 0) / items.length;
         const similarSizes = items.every(item =>
@@ -405,17 +453,15 @@ function choosePreferredNativeLanguage(options) {
         if (!similarSizes || avgWidth < 30 || avgHeight < 25) continue;
         const groupBottom = Math.max(...items.map(item => item.bottom));
         if (groupBottom < vh * 0.2) continue;
-        let score = 50 + Math.min(items.length * 5, 35);
+        let score = 50 + Math.min(items.length * 5, 45);
         if (items.some(item => item.answerControl)) score += 20;
         const widthSimilarity = Math.max(...items.map(item => item.width)) - Math.min(...items.map(item => item.width));
         const heightSimilarity = Math.max(...items.map(item => item.height)) - Math.min(...items.map(item => item.height));
         if (widthSimilarity <= Math.max(avgWidth * 0.2, 12) &&
             heightSimilarity <= Math.max(avgHeight * 0.2, 10)) score += 15;
-
-        const broadCards = items.length >= 3 && avgWidth >= vw * 0.58;
-        if (broadCards) score += 30;
-        if (broadCards && questionSignals.test(pageText)) score += 35;
-
+        if (items.length >= 3) score += 20;
+        if (items.length >= 3 && questionSignals.test(pageText)) score += 45;
+        if (items.every(item => !navigationText.test(item.text.trim()))) score += 15;
         if (!bestGroup || score > bestGroup.score) bestGroup = { score, items };
       }
 
@@ -434,6 +480,7 @@ function choosePreferredNativeLanguage(options) {
         else if (widthRatio >= 0.5) score += 20;
         if (item.height >= 40 && item.height <= 100) score += 20;
         if (item.navigationControl) score += 20;
+        if (navigationText.test(item.text.trim())) score += 60;
         if (item.text.length > 0 && item.text.length <= 50) score += 10;
         if (item.inputType === 'submit' || item.inputType === 'button') score += 20;
         if (item.width < 80 || item.height < 25) score -= 50;
@@ -470,19 +517,16 @@ function choosePreferredNativeLanguage(options) {
           const wanted = wantedLanguage.toLowerCase();
           const vh = window.innerHeight;
           const vw = window.innerWidth;
-          const candidates = Array.from(document.querySelectorAll('body *'))
-            .map((el, index) => {
-              const rect = el.getBoundingClientRect();
-              const style = window.getComputedStyle(el);
-              const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
-              const visible = rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
-                rect.top < vh && rect.left < vw && style.display !== 'none' &&
-                style.visibility !== 'hidden' && Number(style.opacity) > 0;
-              if (!visible || text.toLowerCase() !== wanted) return null;
-              return { index, area: rect.width * rect.height };
-            })
-            .filter(Boolean)
-            .sort((a, b) => a.area - b.area);
+          const candidates = Array.from(document.querySelectorAll('body *')).map((el, index) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+            const visible = rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
+              rect.top < vh && rect.left < vw && style.display !== 'none' &&
+              style.visibility !== 'hidden' && Number(style.opacity) > 0;
+            if (!visible || text.toLowerCase() !== wanted) return null;
+            return { index, area: rect.width * rect.height };
+          }).filter(Boolean).sort((a, b) => a.area - b.area);
           return candidates.length ? candidates[0].index : null;
         }, preferredLanguage);
         if (candidateIndex === null) continue;
@@ -506,10 +550,7 @@ function choosePreferredNativeLanguage(options) {
         const afterSelection = await inspectPage();
         if (afterSelection.cta) {
           const beforeCTA = pageSignature(afterSelection);
-          await safeCrawlerClick(
-            page.locator(`[data-auto-id="${afterSelection.cta.id}"]`),
-            afterSelection.cta.text || 'answer-group CTA'
-          );
+          await safeCrawlerClick(page.locator(`[data-auto-id="${afterSelection.cta.id}"]`), afterSelection.cta.text || 'answer-group CTA');
           if (await waitForAdvancement(beforeCTA, 10000)) return true;
           return false;
         }
@@ -521,10 +562,27 @@ function choosePreferredNativeLanguage(options) {
 
   async function handleAnswerGroup(state) {
     const initialSignature = pageSignature(state);
-    const maxSelections = Math.min(state.group.length, 5);
-    for (let i = 0; i < maxSelections; i++) {
+    const instruction = getSelectionInstruction(state.pageText);
+    const availableAtStart = Math.max(state.group.length, 1);
+    const minSelections = Math.max(1, Math.min(instruction.minSelections || 1, availableAtStart));
+    const hardMax = instruction.maxSelections
+      ? Math.min(instruction.maxSelections, availableAtStart)
+      : Math.min(Math.max(minSelections + 3, 5), availableAtStart, 10);
+    const selectedKeys = new Set();
+
+    console.log('Selection instruction detected:', {
+      reason: instruction.reason,
+      minSelections,
+      maxSelections: instruction.maxSelections || 'until CTA becomes available'
+    });
+
+    for (let attempt = 0; attempt < hardMax; attempt++) {
       state = await inspectPage();
-      if (!state.group.length) return true;
+      if (!state.group.length) {
+        const changed = pageSignature(state) !== initialSignature;
+        return changed || selectedKeys.size >= minSelections;
+      }
+
       let option = null;
       if (isNativeLanguageQuestion(state.pageText)) {
         const preferred = choosePreferredNativeLanguage(state.group);
@@ -533,26 +591,53 @@ function choosePreferredNativeLanguage(options) {
           console.log(preferred.reason);
         }
       }
-      if (!option) option = state.group[Math.min(i, state.group.length - 1)];
-      console.log(`Selecting option ${i + 1}:`, option.text || '[no visible text]');
-      await safeCrawlerClick(
-        page.locator(`[data-auto-id="${option.id}"]`),
-        option.text || 'answer option'
-      );
-      await page.waitForTimeout(600);
+
+      if (!option) {
+        option = state.group.find(candidate => {
+          const key = ((candidate.text || '').trim().toLowerCase() || candidate.id);
+          return !selectedKeys.has(key);
+        });
+      }
+
+      if (!option) break;
+      const optionKey = ((option.text || '').trim().toLowerCase() || option.id);
+      console.log(`Selecting option ${selectedKeys.size + 1}:`, option.text || '[no visible text]');
+      await safeCrawlerClick(page.locator(`[data-auto-id="${option.id}"]`), option.text || 'answer option');
+      selectedKeys.add(optionKey);
+      await page.waitForTimeout(650);
+
       const afterSelection = await inspectPage();
-      if (!afterSelection.group.length) return true;
+      if (pageSignature(afterSelection) !== initialSignature && !afterSelection.group.length) return true;
+
+      if (selectedKeys.size < minSelections) {
+        console.log(`Instruction requires at least ${minSelections}; selected ${selectedKeys.size}. Continuing selections.`);
+        continue;
+      }
+
       if (afterSelection.cta) {
+        console.log('Minimum selection requirement satisfied. Using CTA:', afterSelection.cta.text || '(no text)');
         const beforeCTA = pageSignature(afterSelection);
         await safeCrawlerClick(
           page.locator(`[data-auto-id="${afterSelection.cta.id}"]`),
           afterSelection.cta.text || 'answer-group CTA'
         );
         if (await waitForAdvancement(beforeCTA, 10000)) return true;
-        return false;
       }
+
+      if (instruction.maxSelections && selectedKeys.size >= instruction.maxSelections) break;
     }
-    return pageSignature(await inspectPage()) !== initialSignature;
+
+    const finalState = await inspectPage();
+    if (selectedKeys.size >= minSelections && finalState.cta) {
+      const beforeCTA = pageSignature(finalState);
+      await safeCrawlerClick(
+        page.locator(`[data-auto-id="${finalState.cta.id}"]`),
+        finalState.cta.text || 'answer-group CTA'
+      );
+      if (await waitForAdvancement(beforeCTA, 10000)) return true;
+    }
+
+    return pageSignature(finalState) !== initialSignature;
   }
 
   async function waitForVisualSettle({ initialWaitMs = 2000, checkMs = 400, maxExtraWaitMs = 2000 } = {}) {
@@ -763,7 +848,7 @@ function choosePreferredNativeLanguage(options) {
         fieldType = 'password';
         value = RUN_PASSWORD;
       } else if (
-        ['name','given-name','first-name'].includes(info.autocomplete) ||
+        ['name', 'given-name', 'first-name'].includes(info.autocomplete) ||
         /\b(first[\s_-]*name|your[\s_-]*name|name)\b/i.test(signals)
       ) {
         fieldType = 'name';
@@ -818,9 +903,7 @@ function choosePreferredNativeLanguage(options) {
           formEl.requestSubmit();
           return true;
         });
-        if (submitted && await waitForAdvancement(beforeSignature)) {
-          return { recognized: true, advanced: true };
-        }
+        if (submitted && await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
       }
       const nearbyAction = await findBottomPrimaryFormAction(input);
       if (nearbyAction) {
@@ -853,10 +936,7 @@ function choosePreferredNativeLanguage(options) {
     if (state.cta) {
       console.log('Primary CTA detected:', state.cta.text || '(no text)');
       const beforeSignature = pageSignature(state);
-      await safeCrawlerClick(
-        page.locator(`[data-auto-id="${state.cta.id}"]`),
-        state.cta.text || 'primary CTA'
-      );
+      await safeCrawlerClick(page.locator(`[data-auto-id="${state.cta.id}"]`), state.cta.text || 'primary CTA');
       await page.waitForTimeout(900);
       return pageSignature(await inspectPage()) !== beforeSignature;
     }
@@ -897,9 +977,7 @@ function choosePreferredNativeLanguage(options) {
       console.log('No page advancement detected. Stopping safely.');
       break;
     }
-    if (screenNumber === MAX_SCREENS) {
-      console.log(`Reached safety cap of ${MAX_SCREENS} screens.`);
-    }
+    if (screenNumber === MAX_SCREENS) console.log(`Reached safety cap of ${MAX_SCREENS} screens.`);
   }
 
   await browser.close();
