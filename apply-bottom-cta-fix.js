@@ -20,10 +20,19 @@ s = s.replace(
 );
 
 const startMarker = '  async function findSafeFormActionNearInput(input) {';
-const endMarker = '  async function handleGenericFormInput(state) {';
+const consentHelperMarker = '  async function handleRequiredAgreementCheckboxes(input) {';
+const genericFormMarker = '  async function handleGenericFormInput(state) {';
 
 if (s.includes(startMarker)) {
   const start = s.indexOf(startMarker);
+
+  // IMPORTANT: required-consent handling may have been inserted between the
+  // old form-action helper and handleGenericFormInput. Preserve that helper
+  // instead of deleting the whole region up to handleGenericFormInput.
+  const endMarker = s.includes(consentHelperMarker)
+    ? consentHelperMarker
+    : genericFormMarker;
+
   const end = s.indexOf(endMarker, start);
   if (end < 0) throw new Error('form helper end not found');
 
