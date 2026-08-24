@@ -355,6 +355,8 @@ function isPassiveTransitionScreen(text) {
     return await page.evaluate(() => {
       const vw = window.innerWidth;
       const vh = window.innerHeight;
+      document.querySelectorAll('[data-auto-id]').forEach(el => el.removeAttribute('data-auto-id'));
+      const inspectionId = `${Date.now()}-${Math.floor(Math.random() * 1000000000)}`;
       const all = Array.from(document.querySelectorAll('*'));
       const pageText = document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 3000);
       const questionSignals = /\b(select all that apply|choose all that apply|select any|choose any|select one|choose one|pick one|choose\s+\d+|select\s+\d+|pick\s+\d+|or more|at least|which|what(?:'s| is| are| do| would)|how (?:often|do|would|well|much))\b/i;
@@ -380,7 +382,7 @@ function isPassiveTransitionScreen(text) {
           (tag === 'label' || el.hasAttribute('onclick') || el.tabIndex >= 0 || style.cursor === 'pointer');
         const interactive = answerControl || navigationControl || genericClickable;
         if (!visible || disabled || !interactive || editableField) return null;
-        const id = `auto-${index}`;
+        const id = `${inspectionId}-auto-${index}`;
         el.setAttribute('data-auto-id', id);
         const text = (
           el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || ''
