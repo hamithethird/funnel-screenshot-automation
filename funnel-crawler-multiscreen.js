@@ -279,46 +279,111 @@ async function handleEnglishLanguageChoice() {
       .toLowerCase()
       .replace(/\s+/g, ' ');
 
-    const selector =
-      'button, [role="button"], [role="radio"], [role="option"], ' +
-      'label, a, [tabindex], input[type="radio"]';
+    const isVisible = el => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 &&
+        rect.bottom > 0 && rect.right > 0 &&
+        rect.top < window.innerHeight && rect.left < window.innerWidth &&
+        style.display !== 'none' && style.visibility !== 'hidden' &&
+        Number(style.opacity) > 0;
+    };
 
-    const candidates = Array.from(document.querySelectorAll(selector))
-      .map((el, index) => {
+    const languageForText = text =>
+      languageNames.find(name =>
+        text === name ||
+        text.startsWith(name + ' ') ||
+        text.startsWith(name + '|') ||
+        text.startsWith(name + '/') ||
+        text.startsWith(name + '(')
+      ) || null;
+
+    const cardForLabel = labelEl => {
+      let el = labelEl;
+      let depth = 0;
+      let fallback = null;
+
+      while (el && el !== document.body && depth < 6) {
         const rect = el.getBoundingClientRect();
         const style = getComputedStyle(el);
-        const visible =
-          rect.width > 0 && rect.height > 0 &&
-          rect.bottom > 0 && rect.right > 0 &&
-          rect.top < window.innerHeight && rect.left < window.innerWidth &&
-          style.display !== 'none' && style.visibility !== 'hidden' &&
-          Number(style.opacity) > 0;
+        const tag = el.tagName.toLowerCase();
+        const role = el.getAttribute('role');
+        const substantial =
+          rect.width >= 70 &&
+          rect.height >= 38 &&
+          rect.width <= window.innerWidth * 0.95 &&
+          rect.height <= window.innerHeight * 0.55;
+        const explicitInteractive =
+          tag === 'button' || tag === 'a' || tag === 'label' ||
+          role === 'button' || role === 'radio' || role === 'option' ||
+          el.hasAttribute('onclick') || el.tabIndex >= 0 ||
+          style.cursor === 'pointer';
+        const hasVisibleBorder =
+          parseFloat(style.borderTopWidth || '0') > 0 ||
+          parseFloat(style.borderRightWidth || '0') > 0 ||
+          parseFloat(style.borderBottomWidth || '0') > 0 ||
+          parseFloat(style.borderLeftWidth || '0') > 0;
 
-        if (!visible) return null;
+        if (substantial && explicitInteractive) {
+          return el;
+        }
 
-        const text = normalize(
-          el.innerText || el.value || el.getAttribute('aria-label') || el.textContent || ''
-        );
+        if (substantial && hasVisibleBorder && !fallback) {
+          fallback = el;
+        }
 
-        if (!text || text.length > 80) return null;
+        el = el.parentElement;
+        depth++;
+      }
 
-        const matchedLanguage = languageNames.find(name =>
-          text === name || text.startsWith(name + ' ') || text.startsWith(name + '(')
-        );
+      return fallback;
+    };
 
-        if (!matchedLanguage) return null;
+    const all = Array.from(document.querySelectorAll('body *'));
+    const labels = [];
 
-        return {
-          index,
-          text,
-          matchedLanguage,
-          area: rect.width * rect.height
-        };
-      })
-      .filter(Boolean);
+    for (const el of all) {
+      if (!isVisible(el)) continue;
 
-    const distinctLanguages = new Set(candidates.map(x => x.matchedLanguage));
-    const englishCandidates = candidates
+      const text = normalize(
+        el.innerText ||
+        el.getAttribute('aria-label') ||
+        el.getAttribute('title') ||
+        el.textContent ||
+        ''
+      );
+
+      if (!text || text.length > 100) continue;
+
+      const matchedLanguage = languageForText(text);
+      if (!matchedLanguage) continue;
+
+      const card = cardForLabel(el);
+      if (!card || !isVisible(card)) continue;
+
+      const rect = card.getBoundingClientRect();
+      labels.push({
+        matchedLanguage,
+        text,
+        card,
+        area: rect.width * rect.height
+      });
+    }
+
+    const uniqueCards = [];
+    const seen = new Set();
+
+    for (const item of labels) {
+      if (seen.has(item.card)) continue;
+      seen.add(item.card);
+      uniqueCards.push(item);
+    }
+
+    const distinctLanguages = new Set(
+      uniqueCards.map(x => x.matchedLanguage)
+    );
+
+    const englishCandidates = uniqueCards
       .filter(x => x.matchedLanguage === 'english')
       .sort((a, b) => a.area - b.area);
 
@@ -327,49 +392,40 @@ async function handleEnglishLanguageChoice() {
     }
 
     const chosen = englishCandidates[0];
-    const elements = Array.from(document.querySelectorAll(selector));
-    const el = elements[chosen.index];
+    const autoId =
+      `language-choice-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 
-    if (!el) return null;
+    chosen.card.setAttribute('data-language-choice-id', autoId);
 
-    if (el.tagName.toLowerCase() === 'input' && el.type === 'radio') {
-      if (el.id) {
-        const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-        if (label) return { selectorType: 'labelFor', value: el.id, text: chosen.text };
-      }
-      return { selectorType: 'elementIndex', value: chosen.index, text: chosen.text };
-    }
-
-    const autoId = `language-choice-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
-    el.setAttribute('data-language-choice-id', autoId);
-    return { selectorType: 'dataId', value: autoId, text: chosen.text };
+    return {
+      value: autoId,
+      text: chosen.text,
+      languages: Array.from(distinctLanguages).slice(0, 10)
+    };
   });
 
   if (!result) return false;
 
-  console.log('Language-choice page detected. Preferring English.');
+  console.log(
+    'Language-choice page detected. Preferring English. Languages found:',
+    result.languages
+  );
+
   const beforeState = await inspectPage();
   const beforeSignature = pageSignature(beforeState);
 
-  let target;
-  if (result.selectorType === 'dataId') {
-    target = page.locator(`[data-language-choice-id="${result.value}"]`);
-  } else if (result.selectorType === 'labelFor') {
-    target = page.locator(`label[for="${result.value}"]`);
-  } else {
-    const choices = page.locator(
-      'button, [role="button"], [role="radio"], [role="option"], ' +
-      'label, a, [tabindex], input[type="radio"]'
-    );
-    target = choices.nth(result.value);
-  }
+  const target = page.locator(
+    `[data-language-choice-id="${result.value}"]`
+  );
 
   await safeCrawlerClick(target, 'English language option');
-  await page.waitForTimeout(650);
+  await page.waitForTimeout(700);
 
   let afterState = await inspectPage();
+
   if (pageSignature(afterState) !== beforeSignature) {
     console.log('English language selected.');
+
     if (afterState.cta) {
       const beforeCTA = pageSignature(afterState);
       await safeCrawlerClick(
@@ -378,15 +434,18 @@ async function handleEnglishLanguageChoice() {
       );
       await waitForAdvancement(beforeCTA, 7000);
     }
+
     return true;
   }
 
   afterState = await inspectPage();
+
   if (afterState.cta) {
     await safeCrawlerClick(
       page.locator(`[data-auto-id="${afterState.cta.id}"]`),
       afterState.cta.text || 'language-choice CTA'
     );
+    return true;
   }
 
   return true;
@@ -595,7 +654,8 @@ async function inspectPage() {
 }
 
   function pageSignature(state) {
-    return `${page.url()}\n${state.pageText}`;
+    return `${page.url()}\
+${state.pageText}`;
   }
 
   async function handleCustomNativeLanguage(state) {
@@ -1062,7 +1122,8 @@ async function inspectPage() {
 
     const filename = `${String(screenNumber).padStart(2, '0')}.png`;
     await page.screenshot({ path: filename, fullPage: true });
-    console.log(`\nCaptured ${filename}`);
+    console.log(`\
+Captured ${filename}`);
     console.log({
       url: page.url(),
       CTA: state.cta?.text || null,
