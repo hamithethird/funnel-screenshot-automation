@@ -29,7 +29,6 @@ function choosePreferredNativeLanguage(options) {
       .toLowerCase()
   }));
 
-  // English names in common funnel languages
   const englishNames = [
     'english',
     'ingilizce',
@@ -40,7 +39,6 @@ function choosePreferredNativeLanguage(options) {
     'inglese'
   ];
 
-  // Spanish names in common funnel languages
   const spanishNames = [
     'spanish',
     'español',
@@ -98,9 +96,6 @@ function choosePreferredNativeLanguage(options) {
   await page.goto(url, {
     waitUntil: 'networkidle'
   });
-// -----------------------------------
-// HANDLE COOKIE / PRIVACY CONSENT
-// -----------------------------------
 
 const consentPatterns = [
   /accept all/i,
@@ -110,30 +105,18 @@ const consentPatterns = [
   /agree/i,
   /i agree/i,
   /consent/i,
-
-  // Turkish
   /tümünü kabul et/i,
   /kabul et/i,
   /hepsini kabul et/i,
   /izin ver/i,
-
-  // Spanish
   /aceptar todo/i,
   /aceptar/i,
-
-  // Portuguese
   /aceitar tudo/i,
   /aceitar/i,
-
-  // French
   /tout accepter/i,
   /accepter/i,
-
-  // German
   /alle akzeptieren/i,
   /akzeptieren/i,
-
-  // Italian
   /accetta tutto/i,
   /accetta/i
 ];
@@ -168,17 +151,14 @@ for (let i = 0; i < buttonCount; i++) {
     );
 
     await button.click();
-
     await page.waitForTimeout(700);
 
-    console.log(
-      'Privacy consent accepted.'
-    );
-
+    console.log('Privacy consent accepted.');
     break;
   }
 }
-  async function inspectPage() {
+
+async function inspectPage() {
   return await page.evaluate(() => {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -197,10 +177,7 @@ for (let i = 0; i < buttonCount; i++) {
 
         const inputType =
           tag === 'input'
-            ? (
-                el.getAttribute('type') ||
-                'text'
-              ).toLowerCase()
+            ? (el.getAttribute('type') || 'text').toLowerCase()
             : null;
 
         const visible =
@@ -219,13 +196,6 @@ for (let i = 0; i < buttonCount; i++) {
           el.getAttribute('aria-disabled') === 'true' ||
           style.pointerEvents === 'none';
 
-        /*
-         * Critical separation:
-         *
-         * Editable fields are FORM INPUTS.
-         * They are never navigation CTAs and never
-         * answer-group candidates.
-         */
         const editableField =
           tag === 'textarea' ||
           (
@@ -246,10 +216,7 @@ for (let i = 0; i < buttonCount; i++) {
           role === 'checkbox' ||
           (
             tag === 'input' &&
-            [
-              'radio',
-              'checkbox'
-            ].includes(inputType)
+            ['radio', 'checkbox'].includes(inputType)
           );
 
         const navigationControl =
@@ -258,10 +225,7 @@ for (let i = 0; i < buttonCount; i++) {
           role === 'button' ||
           (
             tag === 'input' &&
-            [
-              'button',
-              'submit'
-            ].includes(inputType)
+            ['button', 'submit'].includes(inputType)
           );
 
         const genericClickable =
@@ -288,11 +252,7 @@ for (let i = 0; i < buttonCount; i++) {
         }
 
         const id = `auto-${index}`;
-
-        el.setAttribute(
-          'data-auto-id',
-          id
-        );
+        el.setAttribute('data-auto-id', id);
 
         const text = (
           el.innerText ||
@@ -308,20 +268,16 @@ for (let i = 0; i < buttonCount; i++) {
 
         return {
           id,
-
           parentId:
             el.parentElement
               ? all.indexOf(el.parentElement)
               : null,
-
           text,
           tag,
           role,
           inputType,
-
           answerControl,
           navigationControl,
-
           width: rect.width,
           height: rect.height,
           top: rect.top,
@@ -332,27 +288,130 @@ for (let i = 0; i < buttonCount; i++) {
       .filter(Boolean);
 
     // -----------------------------------
-    // PRIMARY NAVIGATION CTA
+    // GROUPED ANSWER OPTIONS FIRST
     // -----------------------------------
+    // Buttons and role=button elements are allowed here. Many funnels
+    // implement answer cards as buttons, so tag semantics alone cannot
+    // decide whether a control is navigation.
+    const groups = new Map();
 
+    for (const item of controls) {
+      if (item.parentId === null) {
+        continue;
+      }
+
+      if (!groups.has(item.parentId)) {
+        groups.set(item.parentId, []);
+      }
+
+      groups.get(item.parentId).push(item);
+    }
+
+    let bestGroup = null;
+
+    for (const items of groups.values()) {
+      if (
+        items.length < 2 ||
+        items.length > 15
+      ) {
+        continue;
+      }
+
+      const avgWidth =
+        items.reduce((sum, x) => sum + x.width, 0) /
+        items.length;
+
+      const avgHeight =
+        items.reduce((sum, x) => sum + x.height, 0) /
+        items.length;
+
+      const similarSizes =
+        items.every(item =>
+          Math.abs(item.width - avgWidth) <=
+            Math.max(avgWidth * 0.4, 20) &&
+          Math.abs(item.height - avgHeight) <=
+            Math.max(avgHeight * 0.4, 15)
+        );
+
+      if (!similarSizes) {
+        continue;
+      }
+
+      if (
+        avgWidth < 30 ||
+        avgHeight < 25
+      ) {
+        continue;
+      }
+
+      const groupBottom =
+        Math.max(...items.map(item => item.bottom));
+
+      if (groupBottom < vh * 0.2) {
+        continue;
+      }
+
+      // A repeated set of similarly sized controls is strong answer-card
+      // evidence, including when those controls are technically buttons.
+      let score =
+        50 + Math.min(items.length * 5, 35);
+
+      if (items.some(item => item.answerControl)) {
+        score += 20;
+      }
+
+      const widthSimilarity =
+        Math.max(...items.map(item => item.width)) -
+        Math.min(...items.map(item => item.width));
+
+      const heightSimilarity =
+        Math.max(...items.map(item => item.height)) -
+        Math.min(...items.map(item => item.height));
+
+      if (
+        widthSimilarity <= Math.max(avgWidth * 0.2, 12) &&
+        heightSimilarity <= Math.max(avgHeight * 0.2, 10)
+      ) {
+        score += 15;
+      }
+
+      if (
+        !bestGroup ||
+        score > bestGroup.score
+      ) {
+        bestGroup = {
+          score,
+          items
+        };
+      }
+    }
+
+    const answerIds = new Set(
+      bestGroup
+        ? bestGroup.items.map(item => item.id)
+        : []
+    );
+
+    // -----------------------------------
+    // PRIMARY NAVIGATION CTA SECOND
+    // -----------------------------------
+    // Anything already classified as part of the answer group is excluded
+    // from CTA scoring. This prevents answer-card buttons from competing
+    // with the actual navigation CTA.
     let bestCTA = null;
 
     for (const item of controls) {
-      /*
-       * Answer controls should not compete
-       * with navigation CTAs.
-       */
-      if (item.answerControl) {
+      if (
+        item.answerControl ||
+        answerIds.has(item.id)
+      ) {
         continue;
       }
 
       let score = 0;
 
-      const centerY =
-        item.top + item.height / 2;
-
-      const widthRatio =
-        item.width / vw;
+      const centerY = item.top + item.height / 2;
+      const widthRatio = item.width / vw;
 
       if (centerY > vh * 0.65) {
         score += 40;
@@ -391,11 +450,24 @@ for (let i = 0; i < buttonCount; i++) {
         score += 20;
       }
 
+      // Tiny/inline controls are poor CTA candidates.
       if (
         item.width < 80 ||
         item.height < 25
       ) {
-        score -= 30;
+        score -= 50;
+      }
+
+      // Anchors are allowed as CTAs, but small anchors near the bottom are
+      // commonly footer/legal links and need a strong structural penalty.
+      if (
+        item.tag === 'a' &&
+        (
+          item.width < vw * 0.5 ||
+          item.height < 36
+        )
+      ) {
+        score -= 45;
       }
 
       if (
@@ -409,170 +481,6 @@ for (let i = 0; i < buttonCount; i++) {
       }
     }
 
-    // -----------------------------------
-    // GROUPED ANSWER OPTIONS
-    // -----------------------------------
-
-    const groups = new Map();
-
-    for (const item of controls) {
-      /*
-       * A large navigation button should
-       * not create a fake answer group.
-       */
-      if (
-        item.navigationControl &&
-        !item.answerControl
-      ) {
-        continue;
-      }
-
-      if (item.parentId === null) {
-        continue;
-      }
-
-      if (!groups.has(item.parentId)) {
-        groups.set(
-          item.parentId,
-          []
-        );
-      }
-
-      groups
-        .get(item.parentId)
-        .push(item);
-    }
-
-    /*
-     * Some funnels use clickable DIV/LABEL
-     * cards rather than radio elements.
-     *
-     * Build a second grouping pass for
-     * sibling option-like controls.
-     */
-    for (const item of controls) {
-      if (
-        item.navigationControl ||
-        item.answerControl ||
-        item.parentId === null
-      ) {
-        continue;
-      }
-
-      if (!groups.has(item.parentId)) {
-        groups.set(
-          item.parentId,
-          []
-        );
-      }
-
-      const group =
-        groups.get(item.parentId);
-
-      if (
-        !group.some(
-          existing =>
-            existing.id === item.id
-        )
-      ) {
-        group.push(item);
-      }
-    }
-
-    let bestGroup = null;
-
-    for (const items of groups.values()) {
-      if (
-        items.length < 2 ||
-        items.length > 15
-      ) {
-        continue;
-      }
-
-      const avgWidth =
-        items.reduce(
-          (sum, x) =>
-            sum + x.width,
-          0
-        ) / items.length;
-
-      const avgHeight =
-        items.reduce(
-          (sum, x) =>
-            sum + x.height,
-          0
-        ) / items.length;
-
-      const similarSizes =
-        items.every(item =>
-          Math.abs(
-            item.width - avgWidth
-          ) <=
-            Math.max(
-              avgWidth * 0.4,
-              20
-            ) &&
-          Math.abs(
-            item.height - avgHeight
-          ) <=
-            Math.max(
-              avgHeight * 0.4,
-              15
-            )
-        );
-
-      if (!similarSizes) {
-        continue;
-      }
-
-      if (
-        avgWidth < 30 ||
-        avgHeight < 25
-      ) {
-        continue;
-      }
-
-      const groupBottom =
-        Math.max(
-          ...items.map(
-            item => item.bottom
-          )
-        );
-
-      if (
-        groupBottom <
-        vh * 0.2
-      ) {
-        continue;
-      }
-
-      let score =
-        50 +
-        Math.min(
-          items.length * 5,
-          35
-        );
-
-      if (
-        items.some(
-          item =>
-            item.answerControl
-        )
-      ) {
-        score += 20;
-      }
-
-      if (
-        !bestGroup ||
-        score > bestGroup.score
-      ) {
-        bestGroup = {
-          score,
-          items
-        };
-      }
-    }
-
     const pageText =
       document.body.innerText
         .replace(/\s+/g, ' ')
@@ -581,13 +489,10 @@ for (let i = 0; i < buttonCount; i++) {
 
     return {
       pageText,
-
       cta:
-        bestCTA &&
-        bestCTA.score >= 50
+        bestCTA && bestCTA.score >= 50
           ? bestCTA
           : null,
-
       group:
         bestGroup
           ? bestGroup.items
@@ -595,6 +500,7 @@ for (let i = 0; i < buttonCount; i++) {
     };
   });
 }
+
   function pageSignature(state) {
     return `${page.url()}\n${state.pageText}`;
   }
@@ -751,48 +657,41 @@ for (let i = 0; i < buttonCount; i++) {
         const afterSelection = await inspectPage();
 
         if (afterSelection.cta) {
-  console.log(
-    'Structural CTA available after answer selection:',
-    afterSelection.cta.text || '(no text)'
-  );
+          console.log(
+            'Structural CTA available after answer selection:',
+            afterSelection.cta.text || '(no text)'
+          );
 
-  const beforeCTA =
-    pageSignature(afterSelection);
+          const beforeCTA = pageSignature(afterSelection);
 
-  await page
-    .locator(
-      `[data-auto-id="${afterSelection.cta.id}"]`
-    )
-    .click();
+          await page
+            .locator(
+              `[data-auto-id="${afterSelection.cta.id}"]`
+            )
+            .click();
 
-  const advancementStartedAt = Date.now();
-  const advancementTimeoutMs = 10000;
+          const advancementStartedAt = Date.now();
+          const advancementTimeoutMs = 10000;
 
-  while (
-    Date.now() - advancementStartedAt <
-    advancementTimeoutMs
-  ) {
-    await page.waitForTimeout(500);
+          while (
+            Date.now() - advancementStartedAt < advancementTimeoutMs
+          ) {
+            await page.waitForTimeout(500);
 
-    const afterCTA = await inspectPage();
+            const afterCTA = await inspectPage();
 
-    if (
-      pageSignature(afterCTA) !== beforeCTA
-    ) {
-      console.log(
-        'Advanced after answer-group CTA.'
-      );
+            if (pageSignature(afterCTA) !== beforeCTA) {
+              console.log('Advanced after answer-group CTA.');
+              return true;
+            }
+          }
 
-      return true;
-    }
-  }
+          console.log(
+            'No advancement detected after answer-group CTA within 10s.'
+          );
 
-  console.log(
-    'No advancement detected after answer-group CTA within 10s.'
-  );
-
-  return false;
-}
+          return false;
+        }
 
         return true;
       }
@@ -860,8 +759,7 @@ for (let i = 0; i < buttonCount; i++) {
           afterSelection.cta.text || '(no text)'
         );
 
-        const beforeCTA =
-          pageSignature(afterSelection);
+        const beforeCTA = pageSignature(afterSelection);
 
         await page
           .locator(
@@ -870,33 +768,26 @@ for (let i = 0; i < buttonCount; i++) {
           .click();
 
         const advancementStartedAt = Date.now();
-const advancementTimeoutMs = 10000;
+        const advancementTimeoutMs = 10000;
 
-while (
-  Date.now() - advancementStartedAt <
-  advancementTimeoutMs
-) {
-  await page.waitForTimeout(500);
+        while (
+          Date.now() - advancementStartedAt < advancementTimeoutMs
+        ) {
+          await page.waitForTimeout(500);
 
-  const afterCTA = await inspectPage();
+          const afterCTA = await inspectPage();
 
-  if (
-    pageSignature(afterCTA) !== beforeCTA
-  ) {
-    console.log(
-      'Advanced after answer-group CTA.'
-    );
+          if (pageSignature(afterCTA) !== beforeCTA) {
+            console.log('Advanced after answer-group CTA.');
+            return true;
+          }
+        }
 
-    return true;
-  
-  }
-}
+        console.log(
+          'No advancement detected after answer-group CTA within 10s.'
+        );
 
-console.log(
-  'No advancement detected after answer-group CTA within 10s.'
-);
-
-return false;
+        return false;
       }
     }
 
@@ -905,29 +796,15 @@ return false;
       initialSignature
     );
   }
+
   async function waitForVisualSettle({
-  initialWaitMs = 2000,
-  checkMs = 400,
-  maxExtraWaitMs = 2000
-} = {}) {
-  await page.waitForTimeout(initialWaitMs);
+    initialWaitMs = 2000,
+    checkMs = 400,
+    maxExtraWaitMs = 2000
+  } = {}) {
+    await page.waitForTimeout(initialWaitMs);
 
-  let previousSnapshot = await page.evaluate(() => ({
-    text: document.body.innerText
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 2000),
-    height: document.documentElement.scrollHeight
-  }));
-
-  const startedAt = Date.now();
-
-  while (
-    Date.now() - startedAt < maxExtraWaitMs
-  ) {
-    await page.waitForTimeout(checkMs);
-
-    const currentSnapshot = await page.evaluate(() => ({
+    let previousSnapshot = await page.evaluate(() => ({
       text: document.body.innerText
         .replace(/\s+/g, ' ')
         .trim()
@@ -935,135 +812,141 @@ return false;
       height: document.documentElement.scrollHeight
     }));
 
-    if (
-      currentSnapshot.text === previousSnapshot.text &&
-      currentSnapshot.height === previousSnapshot.height
+    const startedAt = Date.now();
+
+    while (
+      Date.now() - startedAt < maxExtraWaitMs
     ) {
-      return;
-    }
+      await page.waitForTimeout(checkMs);
 
-    previousSnapshot = currentSnapshot;
-  }
-}
-async function waitForActionableState({
-  timeoutMs = 12000,
-  pollMs = 500
-} = {}) {
-  const startedAt = Date.now();
+      const currentSnapshot = await page.evaluate(() => ({
+        text: document.body.innerText
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 2000),
+        height: document.documentElement.scrollHeight
+      }));
 
-  const initialState = await inspectPage();
-  const initialSignature = pageSignature(initialState);
+      if (
+        currentSnapshot.text === previousSnapshot.text &&
+        currentSnapshot.height === previousSnapshot.height
+      ) {
+        return;
+      }
 
-  console.log(
-    `No action available yet. Watching for up to ${timeoutMs / 1000}s...`
-  );
-
-  while (Date.now() - startedAt < timeoutMs) {
-    await page.waitForTimeout(pollMs);
-
-    const state = await inspectPage();
-    const signature = pageSignature(state);
-
-    const actionable =
-      state.group.length > 0 ||
-      state.cta !== null ||
-      isNativeLanguageQuestion(state.pageText);
-
-    if (actionable) {
-      console.log(
-        `Action became available after ${(
-          (Date.now() - startedAt) / 1000
-        ).toFixed(1)}s.`
-      );
-
-      return {
-        state,
-        changed: signature !== initialSignature
-      };
-    }
-
-    if (signature !== initialSignature) {
-      console.log(
-        `Automatic page transition detected after ${(
-          (Date.now() - startedAt) / 1000
-        ).toFixed(1)}s.`
-      );
-
-      return {
-        state,
-        changed: true
-      };
+      previousSnapshot = currentSnapshot;
     }
   }
 
-  console.log(
-    `Nothing actionable or transitional appeared after ${timeoutMs / 1000}s.`
-  );
+  async function waitForActionableState({
+    timeoutMs = 12000,
+    pollMs = 500
+  } = {}) {
+    const startedAt = Date.now();
 
-  return null;
-}
-async function waitForAdvancement(
-  beforeSignature,
-  timeoutMs = 12000
-) {
-  const startedAt = Date.now();
+    const initialState = await inspectPage();
+    const initialSignature = pageSignature(initialState);
 
-  while (
-    Date.now() - startedAt <
-    timeoutMs
+    console.log(
+      `No action available yet. Watching for up to ${timeoutMs / 1000}s...`
+    );
+
+    while (Date.now() - startedAt < timeoutMs) {
+      await page.waitForTimeout(pollMs);
+
+      const state = await inspectPage();
+      const signature = pageSignature(state);
+
+      const actionable =
+        state.group.length > 0 ||
+        state.cta !== null ||
+        isNativeLanguageQuestion(state.pageText);
+
+      if (actionable) {
+        console.log(
+          `Action became available after ${(
+            (Date.now() - startedAt) / 1000
+          ).toFixed(1)}s.`
+        );
+
+        return {
+          state,
+          changed: signature !== initialSignature
+        };
+      }
+
+      if (signature !== initialSignature) {
+        console.log(
+          `Automatic page transition detected after ${(
+            (Date.now() - startedAt) / 1000
+          ).toFixed(1)}s.`
+        );
+
+        return {
+          state,
+          changed: true
+        };
+      }
+    }
+
+    console.log(
+      `Nothing actionable or transitional appeared after ${timeoutMs / 1000}s.`
+    );
+
+    return null;
+  }
+
+  async function waitForAdvancement(
+    beforeSignature,
+    timeoutMs = 12000
   ) {
-    await page.waitForTimeout(500);
+    const startedAt = Date.now();
 
-    const currentState =
-      await inspectPage();
-
-    if (
-      pageSignature(currentState) !==
-      beforeSignature
+    while (
+      Date.now() - startedAt < timeoutMs
     ) {
-      return true;
+      await page.waitForTimeout(500);
+
+      const currentState = await inspectPage();
+
+      if (
+        pageSignature(currentState) !== beforeSignature
+      ) {
+        return true;
+      }
     }
+
+    return false;
   }
 
-  return false;
-}
+  async function handleGenericFormInput(state) {
+    const fields = page.locator(
+      'input:not([type]), ' +
+      'input[type="text"], ' +
+      'input[type="email"], ' +
+      'textarea'
+    );
 
-async function handleGenericFormInput(state) {
-  const fields = page.locator(
-    'input:not([type]), ' +
-    'input[type="text"], ' +
-    'input[type="email"], ' +
-    'textarea'
-  );
+    const count = await fields.count();
 
-  const count =
-    await fields.count();
+    for (let i = 0; i < count; i++) {
+      const input = fields.nth(i);
 
-  for (
-    let i = 0;
-    i < count;
-    i++
-  ) {
-    const input =
-      fields.nth(i);
+      if (
+        !(await input.isVisible()) ||
+        !(await input.isEnabled()) ||
+        !(await input.isEditable())
+      ) {
+        continue;
+      }
 
-    if (
-      !(await input.isVisible()) ||
-      !(await input.isEnabled()) ||
-      !(await input.isEditable())
-    ) {
-      continue;
-    }
-
-    const info =
-      await input.evaluate(el => {
+      const info = await input.evaluate(el => {
         let labelText = '';
 
         if (el.id) {
-          const label =
-            document.querySelector(
-              `label[for="${CSS.escape(el.id)}"]`
-            );
+          const label = document.querySelector(
+            `label[for="${CSS.escape(el.id)}"]`
+          );
 
           if (label) {
             labelText =
@@ -1074,8 +957,7 @@ async function handleGenericFormInput(state) {
         }
 
         if (!labelText) {
-          const parentLabel =
-            el.closest('label');
+          const parentLabel = el.closest('label');
 
           if (parentLabel) {
             labelText =
@@ -1087,150 +969,90 @@ async function handleGenericFormInput(state) {
 
         return {
           type:
-            (
-              el.getAttribute('type') ||
-              'text'
-            ).toLowerCase(),
-
+            (el.getAttribute('type') || 'text').toLowerCase(),
           name:
-            (
-              el.getAttribute('name') ||
-              ''
-            ).toLowerCase(),
-
+            (el.getAttribute('name') || '').toLowerCase(),
           placeholder:
-            (
-              el.getAttribute(
-                'placeholder'
-              ) || ''
-            ).toLowerCase(),
-
+            (el.getAttribute('placeholder') || '').toLowerCase(),
           autocomplete:
-            (
-              el.getAttribute(
-                'autocomplete'
-              ) || ''
-            ).toLowerCase(),
-
+            (el.getAttribute('autocomplete') || '').toLowerCase(),
           ariaLabel:
-            (
-              el.getAttribute(
-                'aria-label'
-              ) || ''
-            ).toLowerCase(),
-
+            (el.getAttribute('aria-label') || '').toLowerCase(),
           label:
-            labelText
-              .trim()
-              .toLowerCase()
+            labelText.trim().toLowerCase()
         };
       });
 
-    const signals = [
-      info.name,
-      info.placeholder,
-      info.autocomplete,
-      info.ariaLabel,
-      info.label
-    ].join(' ');
+      const signals = [
+        info.name,
+        info.placeholder,
+        info.autocomplete,
+        info.ariaLabel,
+        info.label
+      ].join(' ');
 
-    let fieldType = null;
-    let value = null;
+      let fieldType = null;
+      let value = null;
 
-    if (
-      info.type === 'email' ||
-      info.autocomplete === 'email' ||
-      /\be-?mail\b/i.test(signals)
-    ) {
-      fieldType = 'email';
-      value = 'alex@example.com';
-    } else if (
-      [
-        'name',
-        'given-name',
-        'first-name'
-      ].includes(
-        info.autocomplete
-      ) ||
-      /\b(first[\s_-]*name|your[\s_-]*name|name)\b/i
-        .test(signals)
-    ) {
-      fieldType = 'name';
-      value = 'Alex';
-    }
+      if (
+        info.type === 'email' ||
+        info.autocomplete === 'email' ||
+        /\be-?mail\b/i.test(signals)
+      ) {
+        fieldType = 'email';
+        value = 'alex@example.com';
+      } else if (
+        [
+          'name',
+          'given-name',
+          'first-name'
+        ].includes(info.autocomplete) ||
+        /\b(first[\s_-]*name|your[\s_-]*name|name)\b/i
+          .test(signals)
+      ) {
+        fieldType = 'name';
+        value = 'Alex';
+      }
 
-    /*
-     * Unknown text fields are deliberately
-     * left alone.
-     */
-    if (!value) {
-      continue;
-    }
+      if (!value) {
+        continue;
+      }
 
-    console.log(
-      `Detected ${fieldType} input.`
-    );
+      console.log(`Detected ${fieldType} input.`);
 
-    await input.fill(value);
-    await page.waitForTimeout(400);
+      await input.fill(value);
+      await page.waitForTimeout(400);
 
-    const beforeSubmitState =
-      await inspectPage();
+      const beforeSubmitState = await inspectPage();
+      const beforeSignature = pageSignature(beforeSubmitState);
 
-    const beforeSignature =
-      pageSignature(
-        beforeSubmitState
-      );
+      const form = input.locator('xpath=ancestor::form[1]');
 
-    // -----------------------------------
-    // STRATEGY 1:
-    // REAL SUBMIT CONTROL IN SAME FORM
-    // -----------------------------------
-
-    const form =
-      input.locator(
-        'xpath=ancestor::form[1]'
-      );
-
-    if (
-      (await form.count()) > 0
-    ) {
-      const submit =
-        form.locator(
+      if ((await form.count()) > 0) {
+        const submit = form.locator(
           'button[type="submit"], ' +
           'input[type="submit"], ' +
           'button:not([type])'
         ).first();
 
-      if (
-        (await submit.count()) > 0 &&
-        (await submit.isVisible()) &&
-        (await submit.isEnabled())
-      ) {
-        console.log(
-          `Submitting ${fieldType} using form submit control.`
-        );
-
-        await submit.click();
-
         if (
-          await waitForAdvancement(
-            beforeSignature
-          )
+          (await submit.count()) > 0 &&
+          (await submit.isVisible()) &&
+          (await submit.isEnabled())
         ) {
-          return true;
+          console.log(
+            `Submitting ${fieldType} using form submit control.`
+          );
+
+          await submit.click();
+
+          if (await waitForAdvancement(beforeSignature)) {
+            return true;
+          }
         }
-      }
 
-      // --------------------------------
-      // STRATEGY 2:
-      // NATIVE FORM SUBMISSION
-      // --------------------------------
-
-      const submitted =
-        await input.evaluate(el => {
-          const formEl =
-            el.closest('form');
+        const submitted = await input.evaluate(el => {
+          const formEl = el.closest('form');
 
           if (!formEl) {
             return false;
@@ -1240,79 +1062,53 @@ async function handleGenericFormInput(state) {
           return true;
         });
 
-      if (submitted) {
+        if (submitted) {
+          console.log(
+            `Submitting ${fieldType} using native form submission.`
+          );
+
+          if (await waitForAdvancement(beforeSignature)) {
+            return true;
+          }
+        }
+      }
+
+      const afterFill = await inspectPage();
+
+      if (afterFill.cta) {
         console.log(
-          `Submitting ${fieldType} using native form submission.`
+          `Submitting ${fieldType} using structural CTA:`,
+          afterFill.cta.text || '(no text)'
         );
 
-        if (
-          await waitForAdvancement(
-            beforeSignature
+        await page
+          .locator(
+            `[data-auto-id="${afterFill.cta.id}"]`
           )
-        ) {
+          .click();
+
+        if (await waitForAdvancement(beforeSignature)) {
           return true;
         }
       }
-    }
 
-    // -----------------------------------
-    // STRATEGY 3:
-    // CLEAN STRUCTURAL CTA
-    // -----------------------------------
+      console.log(`Trying Enter for ${fieldType} input.`);
+      await input.press('Enter');
 
-    const afterFill =
-      await inspectPage();
-
-    if (afterFill.cta) {
-      console.log(
-        `Submitting ${fieldType} using structural CTA:`,
-        afterFill.cta.text ||
-          '(no text)'
-      );
-
-      await page
-        .locator(
-          `[data-auto-id="${afterFill.cta.id}"]`
-        )
-        .click();
-
-      if (
-        await waitForAdvancement(
-          beforeSignature
-        )
-      ) {
+      if (await waitForAdvancement(beforeSignature)) {
         return true;
       }
+
+      console.log(
+        `Unable to safely submit ${fieldType} field.`
+      );
+
+      return false;
     }
-
-    // -----------------------------------
-    // STRATEGY 4:
-    // KEYBOARD SUBMISSION
-    // -----------------------------------
-
-    console.log(
-      `Trying Enter for ${fieldType} input.`
-    );
-
-    await input.press('Enter');
-
-    if (
-      await waitForAdvancement(
-        beforeSignature
-      )
-    ) {
-      return true;
-    }
-
-    console.log(
-      `Unable to safely submit ${fieldType} field.`
-    );
 
     return false;
   }
 
-  return false;
-}
   async function advanceOneScreen(state) {
     if (isNativeLanguageQuestion(state.pageText)) {
       const handledCustomLanguage =
@@ -1326,20 +1122,21 @@ async function handleGenericFormInput(state) {
     if (state.group.length > 0) {
       return await handleAnswerGroup(state);
     }
-const handledFormInput =
-  await handleGenericFormInput(state);
 
-if (handledFormInput) {
-  return true;
-}
+    const handledFormInput =
+      await handleGenericFormInput(state);
+
+    if (handledFormInput) {
+      return true;
+    }
+
     if (state.cta) {
       console.log(
         'Primary CTA detected:',
         state.cta.text || '(no text)'
       );
 
-      const beforeSignature =
-        pageSignature(state);
+      const beforeSignature = pageSignature(state);
 
       await page
         .locator(
@@ -1355,20 +1152,17 @@ if (handledFormInput) {
       );
     }
 
-    const delayedResult =
-  await waitForActionableState();
+    const delayedResult = await waitForActionableState();
 
-if (!delayedResult) {
-  return false;
-}
+    if (!delayedResult) {
+      return false;
+    }
 
-if (delayedResult.changed) {
-  return true;
-}
+    if (delayedResult.changed) {
+      return true;
+    }
 
-return await advanceOneScreen(
-  delayedResult.state
-);
+    return await advanceOneScreen(delayedResult.state);
   }
 
   const MAX_SCREENS = 100;
@@ -1378,12 +1172,12 @@ return await advanceOneScreen(
     screenNumber <= MAX_SCREENS;
     screenNumber++
   ) {
-   await waitForVisualSettle();
+    await waitForVisualSettle();
 
-const state = await inspectPage();
+    const state = await inspectPage();
 
-const filename =
-  `${String(screenNumber).padStart(2, '0')}.png`;
+    const filename =
+      `${String(screenNumber).padStart(2, '0')}.png`;
 
     await page.screenshot({
       path: filename,
@@ -1399,11 +1193,9 @@ const filename =
         state.group.map(x => x.text)
     });
 
-    const beforeSignature =
-      pageSignature(state);
+    const beforeSignature = pageSignature(state);
 
-    const acted =
-      await advanceOneScreen(state);
+    const acted = await advanceOneScreen(state);
 
     if (!acted) {
       console.log(
@@ -1412,9 +1204,8 @@ const filename =
       break;
     }
 
-const afterState = await inspectPage();
-    const afterSignature =
-      pageSignature(afterState);
+    const afterState = await inspectPage();
+    const afterSignature = pageSignature(afterState);
 
     if (afterSignature === beforeSignature) {
       console.log(
