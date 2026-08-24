@@ -97,66 +97,143 @@ function choosePreferredNativeLanguage(options) {
     waitUntil: 'networkidle'
   });
 
-const consentPatterns = [
-  /accept all/i,
-  /accept/i,
-  /allow all/i,
-  /allow/i,
-  /agree/i,
-  /i agree/i,
-  /consent/i,
-  /tümünü kabul et/i,
-  /kabul et/i,
-  /hepsini kabul et/i,
-  /izin ver/i,
-  /aceptar todo/i,
-  /aceptar/i,
-  /aceitar tudo/i,
-  /aceitar/i,
-  /tout accepter/i,
-  /accepter/i,
-  /alle akzeptieren/i,
-  /akzeptieren/i,
-  /accetta tutto/i,
-  /accetta/i
-];
+function generateRandomAsciiString(length = 16) {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz';
+  let result = '';
 
-const visibleButtons = page.locator(
-  'button, [role="button"], a'
-);
-
-const buttonCount = await visibleButtons.count();
-
-for (let i = 0; i < buttonCount; i++) {
-  const button = visibleButtons.nth(i);
-
-  if (!(await button.isVisible())) {
-    continue;
+  for (let i = 0; i < length; i++) {
+    result += alphabet[Math.floor(Math.random() * alphabet.length)];
   }
 
-  const text = (
-    (await button.innerText().catch(() => '')) ||
-    (await button.getAttribute('aria-label')) ||
-    ''
-  ).trim();
+  return result;
+}
 
-  const isConsentButton =
-    consentPatterns.some(pattern =>
-      pattern.test(text)
+const RUN_EMAIL = `${generateRandomAsciiString(16)}@gmail.com`;
+
+async function dismissBlockingConsentOverlay() {
+  const overlaySelectors = [
+    '[role="dialog"]',
+    '[aria-modal="true"]',
+    '.cky-modal',
+    '.cky-modal-open',
+    '[class*="cookie"]',
+    '[id*="cookie"]',
+    '[class*="consent"]',
+    '[id*="consent"]'
+  ];
+
+  const affirmativePatterns = [
+    /^accept all$/i,
+    /^accept$/i,
+    /^allow all$/i,
+    /^allow$/i,
+    /^agree$/i,
+    /^i agree$/i,
+    /^consent$/i,
+    /^ok$/i,
+    /^okay$/i,
+    /^got it$/i,
+    /^tümünü kabul et$/i,
+    /^kabul et$/i,
+    /^hepsini kabul et$/i,
+    /^izin ver$/i,
+    /^aceptar todo$/i,
+    /^aceptar$/i,
+    /^aceitar tudo$/i,
+    /^aceitar$/i,
+    /^tout accepter$/i,
+    /^accepter$/i,
+    /^alle akzeptieren$/i,
+    /^akzeptieren$/i,
+    /^accetta tutto$/i,
+    /^accetta$/i
+  ];
+
+  const overlays = page.locator(overlaySelectors.join(','));
+  const overlayCount = await overlays.count();
+
+  for (let i = 0; i < overlayCount; i++) {
+    const overlay = overlays.nth(i);
+
+    if (!(await overlay.isVisible().catch(() => false))) {
+      continue;
+    }
+
+    const actions = overlay.locator(
+      'button, [role="button"], input[type="button"], ' +
+      'input[type="submit"], a'
     );
 
-  if (isConsentButton) {
-    console.log(
-      `Privacy consent detected: "${text}"`
-    );
+    const actionCount = await actions.count();
 
-    await button.click();
-    await page.waitForTimeout(700);
+    for (let j = 0; j < actionCount; j++) {
+      const action = actions.nth(j);
 
-    console.log('Privacy consent accepted.');
-    break;
+      if (!(await action.isVisible().catch(() => false))) {
+        continue;
+      }
+
+      const text = (
+        (await action.innerText().catch(() => '')) ||
+        (await action.getAttribute('aria-label')) ||
+        (await action.getAttribute('value')) ||
+        ''
+      )
+        .trim()
+        .replace(/\s+/g, ' ');
+
+      if (!affirmativePatterns.some(pattern => pattern.test(text))) {
+        continue;
+      }
+
+      console.log('Blocking consent modal detected. Dismissing with:', text);
+
+      try {
+        await action.click({ timeout: 5000 });
+      } catch {
+        continue;
+      }
+
+      await page.waitForTimeout(500);
+
+      if (!(await overlay.isVisible().catch(() => false))) {
+        console.log('Blocking consent modal dismissed.');
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+async function safeCrawlerClick(locator, description = 'target') {
+  await dismissBlockingConsentOverlay();
+
+  try {
+    await locator.click({ timeout: 7000 });
+    return true;
+  } catch (error) {
+    const message = String(error?.message || error);
+
+    if (!/intercepts pointer events|another element/i.test(message)) {
+      throw error;
+    }
+
+    console.log('Click blocked while targeting:', description);
+
+    const dismissed = await dismissBlockingConsentOverlay();
+
+    if (!dismissed) {
+      throw error;
+    }
+
+    console.log('Retrying original click after modal dismissal:', description);
+    await locator.click({ timeout: 7000 });
+    return true;
   }
 }
+
+await dismissBlockingConsentOverlay();
 
 async function inspectPage() {
   return await page.evaluate(() => {
@@ -399,10 +476,16 @@ async function inspectPage() {
       const centerY = item.top + item.height / 2;
       const widthRatio = item.width / vw;
 
-      if (centerY > vh * 0.65) {
-        score += 40;
+      // Primary navigation CTAs are usually near the bottom of onboarding screens.
+      // This is a strong prior, but answer-group members were already excluded above.
+      if (centerY > vh * 0.82) {
+        score += 90;
+      } else if (centerY > vh * 0.68) {
+        score += 65;
       } else if (centerY > vh * 0.5) {
-        score += 20;
+        score += 25;
+      } else {
+        score -= 15;
       }
 
       if (widthRatio >= 0.75) {
@@ -647,11 +730,12 @@ async function inspectPage() {
 
           const beforeCTA = pageSignature(afterSelection);
 
-          await page
-            .locator(
+          await safeCrawlerClick(
+            page.locator(
               `[data-auto-id="${afterSelection.cta.id}"]`
-            )
-            .click();
+            ),
+            afterSelection.cta.text || 'answer-group CTA'
+          );
 
           const advancementStartedAt = Date.now();
           const advancementTimeoutMs = 10000;
@@ -722,11 +806,12 @@ async function inspectPage() {
         option.text || '[no visible text]'
       );
 
-      await page
-        .locator(
+      await safeCrawlerClick(
+        page.locator(
           `[data-auto-id="${option.id}"]`
-        )
-        .click();
+        ),
+        option.text || 'answer option'
+      );
 
       await page.waitForTimeout(600);
 
@@ -744,11 +829,12 @@ async function inspectPage() {
 
         const beforeCTA = pageSignature(afterSelection);
 
-        await page
-          .locator(
+        await safeCrawlerClick(
+          page.locator(
             `[data-auto-id="${afterSelection.cta.id}"]`
-          )
-          .click();
+          ),
+          afterSelection.cta.text || 'answer-group CTA'
+        );
 
         const advancementStartedAt = Date.now();
         const advancementTimeoutMs = 10000;
@@ -902,16 +988,174 @@ async function inspectPage() {
     return false;
   }
 
-  async function findSafeFormActionNearInput(input) {
-    const inputBox = await input.boundingBox();
-
-    if (!inputBox) {
-      return null;
-    }
+  async function handleRequiredAgreementCheckboxes(input) {
+    const legalPattern = /\b(terms?|conditions?|privacy|policy|legal|agreement)\b/i;
+    const acceptancePattern = /\b(accept|agree|consent)\b/i;
+    const marketingPattern = /\b(news|newsletter|updates?|offers?|promotions?|marketing|communications?)\b/i;
 
     const candidates = page.locator(
-      'button, [role="button"], ' +
-      'input[type="submit"], input[type="button"]'
+      'input[type="checkbox"], [role="checkbox"]'
+    );
+
+    const count = await candidates.count();
+    let legalFound = false;
+    let allLegalActive = true;
+
+    for (let i = 0; i < count; i++) {
+      const checkbox = candidates.nth(i);
+
+      if (!(await checkbox.isVisible().catch(() => false))) {
+        continue;
+      }
+
+      const getInfo = async () =>
+        await checkbox.evaluate(el => {
+          let labelText = '';
+
+          if (el.id) {
+            const label = document.querySelector(
+              `label[for="${CSS.escape(el.id)}"]`
+            );
+            if (label) labelText = label.innerText || label.textContent || '';
+          }
+
+          if (!labelText) {
+            const parentLabel = el.closest('label');
+            if (parentLabel) {
+              labelText = parentLabel.innerText || parentLabel.textContent || '';
+            }
+          }
+
+          if (!labelText) {
+            labelText = el.getAttribute('aria-label') || '';
+          }
+
+          if (!labelText) {
+            let ancestor = el.parentElement;
+            let depth = 0;
+
+            while (ancestor && depth < 5) {
+              const checkboxCount = ancestor.querySelectorAll(
+                'input[type="checkbox"], [role="checkbox"]'
+              ).length;
+
+              const text = (
+                ancestor.innerText || ancestor.textContent || ''
+              )
+                .trim()
+                .replace(/\s+/g, ' ');
+
+              if (checkboxCount === 1 && text.length > 0 && text.length <= 350) {
+                labelText = text;
+                break;
+              }
+
+              ancestor = ancestor.parentElement;
+              depth++;
+            }
+          }
+
+          return {
+            text: labelText.trim().replace(/\s+/g, ' ').slice(0, 350),
+            checked:
+              el.checked === true ||
+              el.getAttribute('aria-checked') === 'true',
+            required:
+              el.required === true ||
+              el.getAttribute('required') !== null ||
+              el.getAttribute('aria-required') === 'true'
+          };
+        });
+
+      let info = await getInfo();
+
+      if (!info.text) continue;
+
+      const isLegalAgreement =
+        legalPattern.test(info.text) &&
+        (acceptancePattern.test(info.text) || info.required);
+
+      const isMarketingOnly =
+        marketingPattern.test(info.text) &&
+        !legalPattern.test(info.text);
+
+      if (!isLegalAgreement || isMarketingOnly) {
+        continue;
+      }
+
+      legalFound = true;
+
+      for (let attempt = 1; attempt <= 3 && !info.checked; attempt++) {
+        console.log('Required legal agreement checkbox detected:', info.text);
+
+        try {
+          const tag = await checkbox.evaluate(el => el.tagName.toLowerCase());
+          const type = ((await checkbox.getAttribute('type')) || '').toLowerCase();
+
+          if (tag === 'input' && type === 'checkbox') {
+            await checkbox.check({ force: attempt > 1 });
+          } else {
+            await checkbox.click({ force: attempt > 1 });
+          }
+        } catch {
+          const clickedLabel = await checkbox.evaluate(el => {
+            let label = null;
+
+            if (el.id) {
+              label = document.querySelector(
+                `label[for="${CSS.escape(el.id)}"]`
+              );
+            }
+
+            label = label || el.closest('label');
+            if (!label) return false;
+            label.click();
+            return true;
+          });
+
+          if (!clickedLabel) {
+            await checkbox.click({ force: true }).catch(() => {});
+          }
+        }
+
+        await page.waitForTimeout(450);
+        info = await getInfo();
+      }
+
+      if (info.checked) {
+        console.log('Required legal agreement is active:', info.text);
+      } else {
+        allLegalActive = false;
+        console.log('Required legal agreement is still NOT active:', info.text);
+      }
+    }
+
+    if (legalFound) {
+      await input.evaluate(el => el.blur());
+      await page.waitForTimeout(700);
+    }
+
+    return {
+      found: legalFound,
+      active: !legalFound || allLegalActive
+    };
+  }
+
+  async function findBottomPrimaryFormAction(input) {
+    const inputBox = await input.boundingBox();
+    if (!inputBox) return null;
+
+    const metrics = await page.evaluate(() => ({
+      scrollY: window.scrollY,
+      documentHeight: Math.max(
+        document.body.scrollHeight,
+        document.documentElement.scrollHeight
+      ),
+      viewportWidth: window.innerWidth
+    }));
+
+    const candidates = page.locator(
+      'button, [role="button"], input[type="submit"], input[type="button"]'
     );
 
     const count = await candidates.count();
@@ -920,73 +1164,58 @@ async function inspectPage() {
     for (let i = 0; i < count; i++) {
       const candidate = candidates.nth(i);
 
-      if (
-        !(await candidate.isVisible()) ||
-        !(await candidate.isEnabled())
-      ) {
-        continue;
-      }
+      if (!(await candidate.isVisible().catch(() => false))) continue;
 
       const box = await candidate.boundingBox();
+      if (!box || box.width < 120 || box.height < 34) continue;
 
-      if (!box) {
-        continue;
-      }
+      const info = await candidate.evaluate(el => {
+        const style = getComputedStyle(el);
+        return {
+          text: (
+            el.innerText ||
+            el.getAttribute('aria-label') ||
+            el.getAttribute('value') ||
+            ''
+          ).trim().replace(/\s+/g, ' ').slice(0, 100),
+          disabled:
+            el.disabled === true ||
+            el.getAttribute('aria-disabled') === 'true' ||
+            style.pointerEvents === 'none',
+          opacity: Number(style.opacity || 1),
+          type: (el.getAttribute('type') || '').toLowerCase()
+        };
+      });
 
-      const text = (
-        (await candidate.innerText().catch(() => '')) ||
-        (await candidate.getAttribute('aria-label')) ||
-        (await candidate.getAttribute('value')) ||
-        ''
-      ).trim();
+      if (info.disabled || info.opacity < 0.35) continue;
 
-      const verticalGap =
-        box.y - (inputBox.y + inputBox.height);
+      const absoluteTop = box.y + metrics.scrollY;
+      const inputBottom = inputBox.y + metrics.scrollY + inputBox.height;
 
-      const overlapsBelow =
-        verticalGap >= -10 &&
-        verticalGap <= 260;
+      if (absoluteTop < inputBottom - 20) continue;
 
-      const similarHorizontalRegion =
-        Math.abs(box.x - inputBox.x) <= 100;
+      const absoluteBottom = absoluteTop + box.height;
+      const bottomRatio = metrics.documentHeight
+        ? absoluteBottom / metrics.documentHeight
+        : 0;
+      const widthRatio = metrics.viewportWidth
+        ? box.width / metrics.viewportWidth
+        : 0;
 
-      const substantialSize =
-        box.width >= Math.min(inputBox.width * 0.5, 140) &&
-        box.height >= 32;
+      let score =
+        Math.min(bottomRatio, 1) * 120 +
+        Math.min(widthRatio, 1) * 45;
 
-      if (
-        !overlapsBelow ||
-        !similarHorizontalRegion ||
-        !substantialSize
-      ) {
-        continue;
-      }
-
-      let score = 0;
-
-      score += Math.max(0, 120 - Math.max(0, verticalGap));
-      score += Math.min(box.width, 300) / 10;
-
-      const type = (
-        (await candidate.getAttribute('type')) ||
-        ''
-      ).toLowerCase();
-
-      if (type === 'submit') {
-        score += 40;
-      }
-
-      if (text.length > 0 && text.length <= 40) {
-        score += 10;
-      }
+      if (info.type === 'submit') score += 25;
+      if (info.text.length > 0 && info.text.length <= 40) score += 5;
 
       if (!best || score > best.score) {
-        best = {
-          locator: candidate,
-          text,
-          score
-        };
+        best = { locator: candidate, text: info.text, score };
       }
+    }
+
+    if (best) {
+      console.log('Bottom primary form CTA candidate:', best.text || '(no text)');
     }
 
     return best;
@@ -1073,7 +1302,7 @@ async function inspectPage() {
         /\be-?mail\b/i.test(signals)
       ) {
         fieldType = 'email';
-        value = 'alex@example.com';
+        value = RUN_EMAIL;
       } else if (
         [
           'name',
@@ -1095,6 +1324,22 @@ async function inspectPage() {
 
       await input.fill(value);
 
+      if (fieldType === 'email') {
+        const actualEmailState = await input.evaluate(el => ({
+          value: el.value,
+          valid: el.validity ? el.validity.valid : null,
+          validationMessage: el.validationMessage || ''
+        }));
+
+        console.log('EMAIL DEBUG - intended value:', value);
+        console.log('EMAIL DEBUG - actual field value:', actualEmailState.value);
+        console.log('EMAIL DEBUG - browser valid:', actualEmailState.valid);
+        console.log(
+          'EMAIL DEBUG - validation message:',
+          actualEmailState.validationMessage || '(none)'
+        );
+      }
+
       // Trigger the validation/update patterns used by many React/Vue forms.
       await input.evaluate(el => {
         el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1103,6 +1348,16 @@ async function inspectPage() {
       });
 
       await page.waitForTimeout(500);
+
+      const agreementState =
+        await handleRequiredAgreementCheckboxes(input);
+
+      if (!agreementState.active) {
+        console.log(
+          'Required terms/privacy agreement could not be activated.'
+        );
+        return { recognized: true, advanced: false };
+      }
 
       const beforeSubmitState = await inspectPage();
       const beforeSignature = pageSignature(beforeSubmitState);
@@ -1126,7 +1381,14 @@ async function inspectPage() {
             `Submitting ${fieldType} using form submit control.`
           );
 
-          await submit.click();
+          const termsBeforeSubmit =
+            await handleRequiredAgreementCheckboxes(input);
+
+          if (!termsBeforeSubmit.active) {
+            return { recognized: true, advanced: false };
+          }
+
+          await safeCrawlerClick(submit, 'form submit control');
 
           if (await waitForAdvancement(beforeSignature)) {
             return { recognized: true, advanced: true };
@@ -1160,15 +1422,25 @@ async function inspectPage() {
       // Anchors are intentionally excluded, so Privacy Policy / Terms links
       // can never be used as form submission actions.
       const nearbyAction =
-        await findSafeFormActionNearInput(input);
+        await findBottomPrimaryFormAction(input);
 
       if (nearbyAction) {
         console.log(
-          `Submitting ${fieldType} using nearby button:`,
+          `Submitting ${fieldType} using bottom primary CTA:`,
           nearbyAction.text || '(no text)'
         );
 
-        await nearbyAction.locator.click();
+        const termsBeforeNearbyAction =
+          await handleRequiredAgreementCheckboxes(input);
+
+        if (!termsBeforeNearbyAction.active) {
+          return { recognized: true, advanced: false };
+        }
+
+        await safeCrawlerClick(
+          nearbyAction.locator,
+          nearbyAction.text || 'bottom primary CTA'
+        );
 
         if (await waitForAdvancement(beforeSignature)) {
           return { recognized: true, advanced: true };
@@ -1176,6 +1448,13 @@ async function inspectPage() {
       }
 
       // 3. Enter is the final safe fallback for a recognized field.
+      const termsBeforeEnter =
+        await handleRequiredAgreementCheckboxes(input);
+
+      if (!termsBeforeEnter.active) {
+        return { recognized: true, advanced: false };
+      }
+
       console.log(`Trying Enter for ${fieldType} input.`);
       await input.press('Enter');
 
@@ -1225,11 +1504,12 @@ async function inspectPage() {
 
       const beforeSignature = pageSignature(state);
 
-      await page
-        .locator(
+      await safeCrawlerClick(
+        page.locator(
           `[data-auto-id="${state.cta.id}"]`
-        )
-        .click();
+        ),
+        state.cta.text || 'primary CTA'
+      );
 
       await page.waitForTimeout(900);
 
@@ -1260,6 +1540,8 @@ async function inspectPage() {
     screenNumber++
   ) {
     await waitForVisualSettle();
+
+    await dismissBlockingConsentOverlay();
 
     const state = await inspectPage();
 
