@@ -261,332 +261,335 @@ async function safeCrawlerClick(locator, description = 'target') {
 
 await dismissBlockingConsentOverlay();
 
-async function inspectPage() {
-  return await page.evaluate(() => {
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
+async function handleEnglishLanguageChoice() {
+  const result = await page.evaluate(() => {
+    const languageNames = [
+      'english', 'ukrainian', 'українська', 'український',
+      'spanish', 'español', 'french', 'français', 'german', 'deutsch',
+      'italian', 'italiano', 'portuguese', 'português', 'turkish', 'türkçe',
+      'polish', 'polski', 'russian', 'русский', 'arabic', 'العربية',
+      'japanese', '日本語', 'korean', '한국어', 'chinese', '中文',
+      'dutch', 'nederlands', 'swedish', 'svenska', 'norwegian', 'norsk',
+      'danish', 'dansk', 'finnish', 'suomi', 'czech', 'čeština',
+      'romanian', 'română', 'hungarian', 'magyar', 'greek', 'ελληνικά'
+    ];
 
-    const all = Array.from(
-      document.querySelectorAll('*')
-    );
+    const normalize = value => (value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
 
-    const controls = all
+    const selector =
+      'button, [role="button"], [role="radio"], [role="option"], ' +
+      'label, a, [tabindex], input[type="radio"]';
+
+    const candidates = Array.from(document.querySelectorAll(selector))
       .map((el, index) => {
         const rect = el.getBoundingClientRect();
         const style = getComputedStyle(el);
-
-        const tag = el.tagName.toLowerCase();
-        const role = el.getAttribute('role');
-
-        const inputType =
-          tag === 'input'
-            ? (el.getAttribute('type') || 'text').toLowerCase()
-            : null;
-
         const visible =
-          rect.width > 0 &&
-          rect.height > 0 &&
-          rect.bottom > 0 &&
-          rect.right > 0 &&
-          rect.top < vh &&
-          rect.left < vw &&
-          style.display !== 'none' &&
-          style.visibility !== 'hidden' &&
+          rect.width > 0 && rect.height > 0 &&
+          rect.bottom > 0 && rect.right > 0 &&
+          rect.top < window.innerHeight && rect.left < window.innerWidth &&
+          style.display !== 'none' && style.visibility !== 'hidden' &&
           Number(style.opacity) > 0;
 
-        const disabled =
-          el.disabled === true ||
-          el.getAttribute('aria-disabled') === 'true' ||
-          style.pointerEvents === 'none';
+        if (!visible) return null;
 
-        const editableField =
-          tag === 'textarea' ||
-          (
-            tag === 'input' &&
-            [
-              'text',
-              'email',
-              'search',
-              'tel',
-              'url',
-              'password',
-              'number'
-            ].includes(inputType)
-          );
+        const text = normalize(
+          el.innerText || el.value || el.getAttribute('aria-label') || el.textContent || ''
+        );
 
-        const answerControl =
-          role === 'radio' ||
-          role === 'checkbox' ||
-          (
-            tag === 'input' &&
-            ['radio', 'checkbox'].includes(inputType)
-          );
+        if (!text || text.length > 80) return null;
 
-        const navigationControl =
-          tag === 'button' ||
-          tag === 'a' ||
-          role === 'button' ||
-          (
-            tag === 'input' &&
-            ['button', 'submit'].includes(inputType)
-          );
+        const matchedLanguage = languageNames.find(name =>
+          text === name || text.startsWith(name + ' ') || text.startsWith(name + '(')
+        );
 
-        const genericClickable =
-          !editableField &&
-          (
-            tag === 'label' ||
-            el.hasAttribute('onclick') ||
-            el.tabIndex >= 0 ||
-            style.cursor === 'pointer'
-          );
-
-        const interactive =
-          answerControl ||
-          navigationControl ||
-          genericClickable;
-
-        if (
-          !visible ||
-          disabled ||
-          !interactive ||
-          editableField
-        ) {
-          return null;
-        }
-
-        const id = `auto-${index}`;
-        el.setAttribute('data-auto-id', id);
-
-        const text = (
-          el.innerText ||
-          el.value ||
-          el.getAttribute('aria-label') ||
-          el.getAttribute('title') ||
-          el.textContent ||
-          ''
-        )
-          .trim()
-          .replace(/\s+/g, ' ')
-          .slice(0, 100);
+        if (!matchedLanguage) return null;
 
         return {
-          id,
-          parentId:
-            el.parentElement
-              ? all.indexOf(el.parentElement)
-              : null,
+          index,
           text,
-          tag,
-          role,
-          inputType,
-          answerControl,
-          navigationControl,
-          width: rect.width,
-          height: rect.height,
-          top: rect.top,
-          bottom: rect.bottom,
-          left: rect.left
+          matchedLanguage,
+          area: rect.width * rect.height
         };
       })
       .filter(Boolean);
 
+    const distinctLanguages = new Set(candidates.map(x => x.matchedLanguage));
+    const englishCandidates = candidates
+      .filter(x => x.matchedLanguage === 'english')
+      .sort((a, b) => a.area - b.area);
+
+    if (distinctLanguages.size < 2 || englishCandidates.length === 0) {
+      return null;
+    }
+
+    const chosen = englishCandidates[0];
+    const elements = Array.from(document.querySelectorAll(selector));
+    const el = elements[chosen.index];
+
+    if (!el) return null;
+
+    if (el.tagName.toLowerCase() === 'input' && el.type === 'radio') {
+      if (el.id) {
+        const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (label) return { selectorType: 'labelFor', value: el.id, text: chosen.text };
+      }
+      return { selectorType: 'elementIndex', value: chosen.index, text: chosen.text };
+    }
+
+    const autoId = `language-choice-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+    el.setAttribute('data-language-choice-id', autoId);
+    return { selectorType: 'dataId', value: autoId, text: chosen.text };
+  });
+
+  if (!result) return false;
+
+  console.log('Language-choice page detected. Preferring English.');
+  const beforeState = await inspectPage();
+  const beforeSignature = pageSignature(beforeState);
+
+  let target;
+  if (result.selectorType === 'dataId') {
+    target = page.locator(`[data-language-choice-id="${result.value}"]`);
+  } else if (result.selectorType === 'labelFor') {
+    target = page.locator(`label[for="${result.value}"]`);
+  } else {
+    const choices = page.locator(
+      'button, [role="button"], [role="radio"], [role="option"], ' +
+      'label, a, [tabindex], input[type="radio"]'
+    );
+    target = choices.nth(result.value);
+  }
+
+  await safeCrawlerClick(target, 'English language option');
+  await page.waitForTimeout(650);
+
+  let afterState = await inspectPage();
+  if (pageSignature(afterState) !== beforeSignature) {
+    console.log('English language selected.');
+    if (afterState.cta) {
+      const beforeCTA = pageSignature(afterState);
+      await safeCrawlerClick(
+        page.locator(`[data-auto-id="${afterState.cta.id}"]`),
+        afterState.cta.text || 'language-choice CTA'
+      );
+      await waitForAdvancement(beforeCTA, 7000);
+    }
+    return true;
+  }
+
+  afterState = await inspectPage();
+  if (afterState.cta) {
+    await safeCrawlerClick(
+      page.locator(`[data-auto-id="${afterState.cta.id}"]`),
+      afterState.cta.text || 'language-choice CTA'
+    );
+  }
+
+  return true;
+}
+
+async function inspectPaywallState() {
+  return await page.evaluate(() => {
+    const currencyPattern = /(?:[$€£¥₺₹₽₴₩]|\b(?:usd|eur|gbp|cad|aud|nzd|try|jpy|cny|inr|uah|rub|krw)\b)\s*\d|\d[\d.,\s]*\s*(?:[$€£¥₺₹₽₴₩]|\b(?:usd|eur|gbp|cad|aud|nzd|try|jpy|cny|inr|uah|rub|krw)\b)/i;
+    const elements = Array.from(document.querySelectorAll('body *'));
+    const prices = [];
+
+    for (const el of elements) {
+      if (el.children.length > 3) continue;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      const visible =
+        rect.width > 0 && rect.height > 0 &&
+        style.display !== 'none' && style.visibility !== 'hidden' &&
+        Number(style.opacity) > 0;
+      if (!visible) continue;
+
+      const text = (el.innerText || el.textContent || '')
+        .trim()
+        .replace(/\s+/g, ' ')
+        .slice(0, 120);
+      if (!text || !currencyPattern.test(text)) continue;
+
+      const crossed =
+        el.tagName.toLowerCase() === 'del' ||
+        el.tagName.toLowerCase() === 's' ||
+        style.textDecorationLine.includes('line-through') ||
+        style.textDecoration.includes('line-through');
+
+      const modalAncestor = el.closest(
+        '[role="dialog"], [aria-modal="true"], .modal, [class*="modal"], [class*="popup"], [class*="dialog"]'
+      );
+
+      prices.push({ text, crossed, inModal: !!modalAncestor });
+    }
+
+    const unique = [];
+    const seen = new Set();
+    for (const price of prices) {
+      const key = `${price.text}|${price.crossed}|${price.inModal}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(price);
+      }
+    }
+
+    const crossed = unique.filter(x => x.crossed);
+    const current = unique.filter(x => !x.crossed);
+    const hasDiscountPair = crossed.length > 0 && current.length > 0;
+    const pairOnlyInModal = hasDiscountPair &&
+      crossed.every(x => x.inModal) && current.every(x => x.inModal);
+
+    const documentHeight = Math.max(
+      document.body.scrollHeight,
+      document.documentElement.scrollHeight
+    );
+    const documentWidth = Math.max(
+      document.body.scrollWidth,
+      document.documentElement.scrollWidth
+    );
+    const longPage = documentHeight > window.innerHeight * 1.3;
+
+    return {
+      hasDiscountPair,
+      pairOnlyInModal,
+      longPage,
+      documentHeight,
+      documentWidth,
+      crossedPrices: crossed.map(x => x.text).slice(0, 5),
+      currentPrices: current.map(x => x.text).slice(0, 5),
+      isPagePaywall: hasDiscountPair && !pairOnlyInModal && longPage
+    };
+  });
+}
+
+async function capturePaywallPdf(screenNumber, paywallState) {
+  const filename = `paywall-${String(screenNumber).padStart(2, '0')}.pdf`;
+  const width = Math.max(390, Math.ceil(paywallState.documentWidth));
+  const height = Math.max(844, Math.ceil(paywallState.documentHeight));
+
+  await page.emulateMedia({ media: 'screen' });
+  await page.pdf({
+    path: filename,
+    printBackground: true,
+    width: `${width}px`,
+    height: `${height}px`,
+    margin: { top: '0', right: '0', bottom: '0', left: '0' },
+    pageRanges: '1'
+  });
+
+  console.log('Paywall detected from discounted price structure.');
+  console.log('Crossed prices:', paywallState.crossedPrices);
+  console.log('Current prices:', paywallState.currentPrices);
+  console.log(`Captured entire paywall as single-page PDF: ${filename}`);
+}
+
+async function inspectPage() {
+  return await page.evaluate(() => {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const all = Array.from(document.querySelectorAll('*'));
+
+    const controls = all.map((el, index) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      const tag = el.tagName.toLowerCase();
+      const role = el.getAttribute('role');
+      const inputType = tag === 'input'
+        ? (el.getAttribute('type') || 'text').toLowerCase()
+        : null;
+      const visible =
+        rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
+        rect.top < vh && rect.left < vw && style.display !== 'none' &&
+        style.visibility !== 'hidden' && Number(style.opacity) > 0;
+      const disabled =
+        el.disabled === true || el.getAttribute('aria-disabled') === 'true' ||
+        style.pointerEvents === 'none';
+      const editableField = tag === 'textarea' ||
+        (tag === 'input' && ['text','email','search','tel','url','password','number'].includes(inputType));
+      const answerControl = role === 'radio' || role === 'checkbox' ||
+        (tag === 'input' && ['radio','checkbox'].includes(inputType));
+      const navigationControl = tag === 'button' || tag === 'a' || role === 'button' ||
+        (tag === 'input' && ['button','submit'].includes(inputType));
+      const genericClickable = !editableField &&
+        (tag === 'label' || el.hasAttribute('onclick') || el.tabIndex >= 0 || style.cursor === 'pointer');
+      const interactive = answerControl || navigationControl || genericClickable;
+      if (!visible || disabled || !interactive || editableField) return null;
+
+      const id = `auto-${index}`;
+      el.setAttribute('data-auto-id', id);
+      const text = (
+        el.innerText || el.value || el.getAttribute('aria-label') ||
+        el.getAttribute('title') || el.textContent || ''
+      ).trim().replace(/\s+/g, ' ').slice(0, 100);
+
+      return {
+        id,
+        parentId: el.parentElement ? all.indexOf(el.parentElement) : null,
+        text, tag, role, inputType, answerControl, navigationControl,
+        width: rect.width, height: rect.height, top: rect.top,
+        bottom: rect.bottom, left: rect.left
+      };
+    }).filter(Boolean);
+
     const groups = new Map();
-
     for (const item of controls) {
-      if (item.parentId === null) {
-        continue;
-      }
-
-      if (!groups.has(item.parentId)) {
-        groups.set(item.parentId, []);
-      }
-
+      if (item.parentId === null) continue;
+      if (!groups.has(item.parentId)) groups.set(item.parentId, []);
       groups.get(item.parentId).push(item);
     }
 
     let bestGroup = null;
-
     for (const items of groups.values()) {
-      if (
-        items.length < 2 ||
-        items.length > 15
-      ) {
-        continue;
-      }
-
-      const avgWidth =
-        items.reduce((sum, x) => sum + x.width, 0) /
-        items.length;
-
-      const avgHeight =
-        items.reduce((sum, x) => sum + x.height, 0) /
-        items.length;
-
-      const similarSizes =
-        items.every(item =>
-          Math.abs(item.width - avgWidth) <=
-            Math.max(avgWidth * 0.4, 20) &&
-          Math.abs(item.height - avgHeight) <=
-            Math.max(avgHeight * 0.4, 15)
-        );
-
-      if (!similarSizes) {
-        continue;
-      }
-
-      if (
-        avgWidth < 30 ||
-        avgHeight < 25
-      ) {
-        continue;
-      }
-
-      const groupBottom =
-        Math.max(...items.map(item => item.bottom));
-
-      if (groupBottom < vh * 0.2) {
-        continue;
-      }
-
-      let score =
-        50 + Math.min(items.length * 5, 35);
-
-      if (items.some(item => item.answerControl)) {
-        score += 20;
-      }
-
-      const widthSimilarity =
-        Math.max(...items.map(item => item.width)) -
-        Math.min(...items.map(item => item.width));
-
-      const heightSimilarity =
-        Math.max(...items.map(item => item.height)) -
-        Math.min(...items.map(item => item.height));
-
-      if (
-        widthSimilarity <= Math.max(avgWidth * 0.2, 12) &&
-        heightSimilarity <= Math.max(avgHeight * 0.2, 10)
-      ) {
-        score += 15;
-      }
-
-      if (
-        !bestGroup ||
-        score > bestGroup.score
-      ) {
-        bestGroup = {
-          score,
-          items
-        };
-      }
+      if (items.length < 2 || items.length > 15) continue;
+      const avgWidth = items.reduce((sum, x) => sum + x.width, 0) / items.length;
+      const avgHeight = items.reduce((sum, x) => sum + x.height, 0) / items.length;
+      const similarSizes = items.every(item =>
+        Math.abs(item.width - avgWidth) <= Math.max(avgWidth * 0.4, 20) &&
+        Math.abs(item.height - avgHeight) <= Math.max(avgHeight * 0.4, 15)
+      );
+      if (!similarSizes || avgWidth < 30 || avgHeight < 25) continue;
+      const groupBottom = Math.max(...items.map(item => item.bottom));
+      if (groupBottom < vh * 0.2) continue;
+      let score = 50 + Math.min(items.length * 5, 35);
+      if (items.some(item => item.answerControl)) score += 20;
+      const widthSimilarity = Math.max(...items.map(item => item.width)) - Math.min(...items.map(item => item.width));
+      const heightSimilarity = Math.max(...items.map(item => item.height)) - Math.min(...items.map(item => item.height));
+      if (widthSimilarity <= Math.max(avgWidth * 0.2, 12) &&
+          heightSimilarity <= Math.max(avgHeight * 0.2, 10)) score += 15;
+      if (!bestGroup || score > bestGroup.score) bestGroup = { score, items };
     }
 
-    const answerIds = new Set(
-      bestGroup
-        ? bestGroup.items.map(item => item.id)
-        : []
-    );
-
+    const answerIds = new Set(bestGroup ? bestGroup.items.map(item => item.id) : []);
     let bestCTA = null;
-
     for (const item of controls) {
-      if (
-        item.answerControl ||
-        answerIds.has(item.id)
-      ) {
-        continue;
-      }
-
+      if (item.answerControl || answerIds.has(item.id)) continue;
       let score = 0;
-
       const centerY = item.top + item.height / 2;
       const widthRatio = item.width / vw;
-
-      if (centerY > vh * 0.82) {
-        score += 90;
-      } else if (centerY > vh * 0.68) {
-        score += 65;
-      } else if (centerY > vh * 0.5) {
-        score += 25;
-      } else {
-        score -= 15;
-      }
-
-      if (widthRatio >= 0.75) {
-        score += 30;
-      } else if (widthRatio >= 0.5) {
-        score += 20;
-      }
-
-      if (
-        item.height >= 40 &&
-        item.height <= 100
-      ) {
-        score += 20;
-      }
-
-      if (item.navigationControl) {
-        score += 20;
-      }
-
-      if (
-        item.text.length > 0 &&
-        item.text.length <= 50
-      ) {
-        score += 10;
-      }
-
-      if (
-        item.inputType === 'submit' ||
-        item.inputType === 'button'
-      ) {
-        score += 20;
-      }
-
-      if (
-        item.width < 80 ||
-        item.height < 25
-      ) {
-        score -= 50;
-      }
-
-      if (
-        item.tag === 'a' &&
-        (
-          item.width < vw * 0.5 ||
-          item.height < 36
-        )
-      ) {
-        score -= 45;
-      }
-
-      if (
-        !bestCTA ||
-        score > bestCTA.score
-      ) {
-        bestCTA = {
-          ...item,
-          score
-        };
-      }
+      if (centerY > vh * 0.82) score += 90;
+      else if (centerY > vh * 0.68) score += 65;
+      else if (centerY > vh * 0.5) score += 25;
+      else score -= 15;
+      if (widthRatio >= 0.75) score += 30;
+      else if (widthRatio >= 0.5) score += 20;
+      if (item.height >= 40 && item.height <= 100) score += 20;
+      if (item.navigationControl) score += 20;
+      if (item.text.length > 0 && item.text.length <= 50) score += 10;
+      if (item.inputType === 'submit' || item.inputType === 'button') score += 20;
+      if (item.width < 80 || item.height < 25) score -= 50;
+      if (item.tag === 'a' && (item.width < vw * 0.5 || item.height < 36)) score -= 45;
+      if (!bestCTA || score > bestCTA.score) bestCTA = { ...item, score };
     }
 
-    const pageText =
-      document.body.innerText
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 3000);
-
+    const pageText = document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 3000);
     return {
       pageText,
-      cta:
-        bestCTA && bestCTA.score >= 50
-          ? bestCTA
-          : null,
-      group:
-        bestGroup
-          ? bestGroup.items
-          : []
+      cta: bestCTA && bestCTA.score >= 50 ? bestCTA : null,
+      group: bestGroup ? bestGroup.items : []
     };
   });
 }
@@ -596,23 +599,13 @@ async function inspectPage() {
   }
 
   async function handleCustomNativeLanguage(state) {
-    if (!isNativeLanguageQuestion(state.pageText)) {
-      return false;
-    }
-
-    const textInputs = page.locator(
-      'input:not([type]), input[type="text"], input[type="search"]'
-    );
-
+    if (!isNativeLanguageQuestion(state.pageText)) return false;
+    const textInputs = page.locator('input:not([type]), input[type="text"], input[type="search"]');
     const inputCount = await textInputs.count();
 
     for (let i = 0; i < inputCount; i++) {
       const input = textInputs.nth(i);
-
-      if (!(await input.isVisible()) || !(await input.isEnabled())) {
-        continue;
-      }
-
+      if (!(await input.isVisible()) || !(await input.isEnabled())) continue;
       console.log('Native-language text input detected.');
 
       for (const preferredLanguage of ['English', 'Spanish']) {
@@ -621,273 +614,99 @@ async function inspectPage() {
         await input.fill(preferredLanguage);
         await page.waitForTimeout(500);
 
-        const candidateIndex = await page.evaluate(
-          (wantedLanguage) => {
-            const wanted = wantedLanguage.toLowerCase();
-            const vh = window.innerHeight;
-            const vw = window.innerWidth;
+        const candidateIndex = await page.evaluate((wantedLanguage) => {
+          const wanted = wantedLanguage.toLowerCase();
+          const vh = window.innerHeight;
+          const vw = window.innerWidth;
+          const candidates = Array.from(document.querySelectorAll('body *'))
+            .map((el, index) => {
+              const rect = el.getBoundingClientRect();
+              const style = window.getComputedStyle(el);
+              const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+              const visible = rect.width > 0 && rect.height > 0 && rect.bottom > 0 &&
+                rect.right > 0 && rect.top < vh && rect.left < vw &&
+                style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0;
+              if (!visible || text.toLowerCase() !== wanted) return null;
+              return { index, area: rect.width * rect.height };
+            })
+            .filter(Boolean)
+            .sort((a, b) => a.area - b.area);
+          return candidates.length ? candidates[0].index : null;
+        }, preferredLanguage);
 
-            const candidates = Array.from(
-              document.querySelectorAll('body *')
-            )
-              .map((el, index) => {
-                const rect = el.getBoundingClientRect();
-                const style = window.getComputedStyle(el);
+        if (candidateIndex === null) continue;
+        const clicked = await page.evaluate(({ wantedLanguage, candidateIndex }) => {
+          const elements = Array.from(document.querySelectorAll('body *'));
+          const el = elements[candidateIndex];
+          if (!el) return false;
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+          const visible = rect.width > 0 && rect.height > 0 && style.display !== 'none' &&
+            style.visibility !== 'hidden' && Number(style.opacity) > 0;
+          if (!visible || text.toLowerCase() !== wantedLanguage.toLowerCase()) return false;
+          const clickable = el.closest(
+            'button, [role="option"], [role="menuitem"], [role="button"], a, li'
+          ) || el;
+          clickable.click();
+          return true;
+        }, { wantedLanguage: preferredLanguage, candidateIndex });
 
-                const text = (
-                  el.innerText ||
-                  el.textContent ||
-                  ''
-                )
-                  .trim()
-                  .replace(/\s+/g, ' ');
-
-                const visible =
-                  rect.width > 0 &&
-                  rect.height > 0 &&
-                  rect.bottom > 0 &&
-                  rect.right > 0 &&
-                  rect.top < vh &&
-                  rect.left < vw &&
-                  style.display !== 'none' &&
-                  style.visibility !== 'hidden' &&
-                  Number(style.opacity) > 0;
-
-                if (
-                  !visible ||
-                  text.toLowerCase() !== wanted
-                ) {
-                  return null;
-                }
-
-                return {
-                  index,
-                  area: rect.width * rect.height
-                };
-              })
-              .filter(Boolean)
-              .sort((a, b) => a.area - b.area);
-
-            return candidates.length
-              ? candidates[0].index
-              : null;
-          },
-          preferredLanguage
-        );
-
-        if (candidateIndex === null) {
-          continue;
-        }
-
-        const clicked = await page.evaluate(
-          ({ wantedLanguage, candidateIndex }) => {
-            const elements = Array.from(
-              document.querySelectorAll('body *')
-            );
-
-            const el = elements[candidateIndex];
-
-            if (!el) {
-              return false;
-            }
-
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-
-            const text = (
-              el.innerText ||
-              el.textContent ||
-              ''
-            )
-              .trim()
-              .replace(/\s+/g, ' ');
-
-            const visible =
-              rect.width > 0 &&
-              rect.height > 0 &&
-              style.display !== 'none' &&
-              style.visibility !== 'hidden' &&
-              Number(style.opacity) > 0;
-
-            if (
-              !visible ||
-              text.toLowerCase() !==
-                wantedLanguage.toLowerCase()
-            ) {
-              return false;
-            }
-
-            const clickable =
-              el.closest(
-                'button, [role="option"], ' +
-                '[role="menuitem"], [role="button"], ' +
-                'a, li'
-              ) || el;
-
-            clickable.click();
-
-            return true;
-          },
-          {
-            wantedLanguage: preferredLanguage,
-            candidateIndex
-          }
-        );
-
-        if (!clicked) {
-          continue;
-        }
-
-        console.log(
-          `Selected preferred native language: ${preferredLanguage}`
-        );
-
+        if (!clicked) continue;
+        console.log(`Selected preferred native language: ${preferredLanguage}`);
         await page.waitForTimeout(500);
-
         const afterSelection = await inspectPage();
-
         if (afterSelection.cta) {
-          console.log(
-            'Structural CTA available after answer selection:',
-            afterSelection.cta.text || '(no text)'
-          );
-
           const beforeCTA = pageSignature(afterSelection);
-
           await safeCrawlerClick(
-            page.locator(
-              `[data-auto-id="${afterSelection.cta.id}"]`
-            ),
+            page.locator(`[data-auto-id="${afterSelection.cta.id}"]`),
             afterSelection.cta.text || 'answer-group CTA'
           );
-
-          const advancementStartedAt = Date.now();
-          const advancementTimeoutMs = 10000;
-
-          while (
-            Date.now() - advancementStartedAt < advancementTimeoutMs
-          ) {
-            await page.waitForTimeout(500);
-
-            const afterCTA = await inspectPage();
-
-            if (pageSignature(afterCTA) !== beforeCTA) {
-              console.log('Advanced after answer-group CTA.');
-              return true;
-            }
-          }
-
-          console.log(
-            'No advancement detected after answer-group CTA within 10s.'
-          );
-
+          if (await waitForAdvancement(beforeCTA, 10000)) return true;
           return false;
         }
-
         return true;
       }
     }
-
     return false;
   }
 
   async function handleAnswerGroup(state) {
     const initialSignature = pageSignature(state);
-
-    const maxSelections = Math.min(
-      state.group.length,
-      5
-    );
+    const maxSelections = Math.min(state.group.length, 5);
 
     for (let i = 0; i < maxSelections; i++) {
       state = await inspectPage();
-
-      if (!state.group.length) {
-        return true;
-      }
-
+      if (!state.group.length) return true;
       let option = null;
-
       if (isNativeLanguageQuestion(state.pageText)) {
-        const preferred =
-          choosePreferredNativeLanguage(state.group);
-
+        const preferred = choosePreferredNativeLanguage(state.group);
         if (preferred) {
           option = preferred.option;
           console.log(preferred.reason);
         }
       }
-
-      if (!option) {
-        option =
-          state.group[
-            Math.min(i, state.group.length - 1)
-          ];
-      }
-
-      console.log(
-        `Selecting option ${i + 1}:`,
-        option.text || '[no visible text]'
-      );
-
+      if (!option) option = state.group[Math.min(i, state.group.length - 1)];
+      console.log(`Selecting option ${i + 1}:`, option.text || '[no visible text]');
       await safeCrawlerClick(
-        page.locator(
-          `[data-auto-id="${option.id}"]`
-        ),
+        page.locator(`[data-auto-id="${option.id}"]`),
         option.text || 'answer option'
       );
-
       await page.waitForTimeout(600);
-
       const afterSelection = await inspectPage();
-
-      if (!afterSelection.group.length) {
-        return true;
-      }
-
+      if (!afterSelection.group.length) return true;
       if (afterSelection.cta) {
-        console.log(
-          'Structural CTA available after answer selection:',
-          afterSelection.cta.text || '(no text)'
-        );
-
         const beforeCTA = pageSignature(afterSelection);
-
         await safeCrawlerClick(
-          page.locator(
-            `[data-auto-id="${afterSelection.cta.id}"]`
-          ),
+          page.locator(`[data-auto-id="${afterSelection.cta.id}"]`),
           afterSelection.cta.text || 'answer-group CTA'
         );
-
-        const advancementStartedAt = Date.now();
-        const advancementTimeoutMs = 10000;
-
-        while (
-          Date.now() - advancementStartedAt < advancementTimeoutMs
-        ) {
-          await page.waitForTimeout(500);
-
-          const afterCTA = await inspectPage();
-
-          if (pageSignature(afterCTA) !== beforeCTA) {
-            console.log('Advanced after answer-group CTA.');
-            return true;
-          }
-        }
-
-        console.log(
-          'No advancement detected after answer-group CTA within 10s.'
-        );
-
+        if (await waitForAdvancement(beforeCTA, 10000)) return true;
         return false;
       }
     }
 
-    return (
-      pageSignature(await inspectPage()) !==
-      initialSignature
-    );
+    return pageSignature(await inspectPage()) !== initialSignature;
   }
 
   async function waitForVisualSettle({
@@ -896,119 +715,46 @@ async function inspectPage() {
     maxExtraWaitMs = 2000
   } = {}) {
     await page.waitForTimeout(initialWaitMs);
-
     let previousSnapshot = await page.evaluate(() => ({
-      text: document.body.innerText
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 2000),
+      text: document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 2000),
       height: document.documentElement.scrollHeight
     }));
-
     const startedAt = Date.now();
-
-    while (
-      Date.now() - startedAt < maxExtraWaitMs
-    ) {
+    while (Date.now() - startedAt < maxExtraWaitMs) {
       await page.waitForTimeout(checkMs);
-
       const currentSnapshot = await page.evaluate(() => ({
-        text: document.body.innerText
-          .replace(/\s+/g, ' ')
-          .trim()
-          .slice(0, 2000),
+        text: document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 2000),
         height: document.documentElement.scrollHeight
       }));
-
-      if (
-        currentSnapshot.text === previousSnapshot.text &&
-        currentSnapshot.height === previousSnapshot.height
-      ) {
-        return;
-      }
-
+      if (currentSnapshot.text === previousSnapshot.text && currentSnapshot.height === previousSnapshot.height) return;
       previousSnapshot = currentSnapshot;
     }
   }
 
-  async function waitForActionableState({
-    timeoutMs = 12000,
-    pollMs = 500
-  } = {}) {
+  async function waitForActionableState({ timeoutMs = 12000, pollMs = 500 } = {}) {
     const startedAt = Date.now();
-
     const initialState = await inspectPage();
     const initialSignature = pageSignature(initialState);
-
-    console.log(
-      `No action available yet. Watching for up to ${timeoutMs / 1000}s...`
-    );
-
+    console.log(`No action available yet. Watching for up to ${timeoutMs / 1000}s...`);
     while (Date.now() - startedAt < timeoutMs) {
       await page.waitForTimeout(pollMs);
-
       const state = await inspectPage();
       const signature = pageSignature(state);
-
-      const actionable =
-        state.group.length > 0 ||
-        state.cta !== null ||
-        isNativeLanguageQuestion(state.pageText);
-
-      if (actionable) {
-        console.log(
-          `Action became available after ${(
-            (Date.now() - startedAt) / 1000
-          ).toFixed(1)}s.`
-        );
-
-        return {
-          state,
-          changed: signature !== initialSignature
-        };
-      }
-
-      if (signature !== initialSignature) {
-        console.log(
-          `Automatic page transition detected after ${(
-            (Date.now() - startedAt) / 1000
-          ).toFixed(1)}s.`
-        );
-
-        return {
-          state,
-          changed: true
-        };
-      }
+      const actionable = state.group.length > 0 || state.cta !== null || isNativeLanguageQuestion(state.pageText);
+      if (actionable) return { state, changed: signature !== initialSignature };
+      if (signature !== initialSignature) return { state, changed: true };
     }
-
-    console.log(
-      `Nothing actionable or transitional appeared after ${timeoutMs / 1000}s.`
-    );
-
+    console.log(`Nothing actionable or transitional appeared after ${timeoutMs / 1000}s.`);
     return null;
   }
 
-  async function waitForAdvancement(
-    beforeSignature,
-    timeoutMs = 12000
-  ) {
+  async function waitForAdvancement(beforeSignature, timeoutMs = 12000) {
     const startedAt = Date.now();
-
-    while (
-      Date.now() - startedAt < timeoutMs
-    ) {
+    while (Date.now() - startedAt < timeoutMs) {
       await page.waitForTimeout(500);
-
       const currentState = await inspectPage();
-
-      if (
-        pageSignature(currentState) !== beforeSignature
-      ) {
-        return true;
-      }
+      if (pageSignature(currentState) !== beforeSignature) return true;
     }
-
     return false;
   }
 
@@ -1016,139 +762,79 @@ async function inspectPage() {
     const legalPattern = /\b(terms?|conditions?|privacy|policy|legal|agreement)\b/i;
     const acceptancePattern = /\b(accept|agree|consent)\b/i;
     const marketingPattern = /\b(news|newsletter|updates?|offers?|promotions?|marketing|communications?)\b/i;
-
-    const candidates = page.locator(
-      'input[type="checkbox"], [role="checkbox"]'
-    );
-
+    const candidates = page.locator('input[type="checkbox"], [role="checkbox"]');
     const count = await candidates.count();
     let legalFound = false;
     let allLegalActive = true;
 
     for (let i = 0; i < count; i++) {
       const checkbox = candidates.nth(i);
-
-      if (!(await checkbox.isVisible().catch(() => false))) {
-        continue;
-      }
-
-      const getInfo = async () =>
-        await checkbox.evaluate(el => {
-          let labelText = '';
-
-          if (el.id) {
-            const label = document.querySelector(
-              `label[for="${CSS.escape(el.id)}"]`
-            );
-            if (label) labelText = label.innerText || label.textContent || '';
-          }
-
-          if (!labelText) {
-            const parentLabel = el.closest('label');
-            if (parentLabel) {
-              labelText = parentLabel.innerText || parentLabel.textContent || '';
+      if (!(await checkbox.isVisible().catch(() => false))) continue;
+      const getInfo = async () => await checkbox.evaluate(el => {
+        let labelText = '';
+        if (el.id) {
+          const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+          if (label) labelText = label.innerText || label.textContent || '';
+        }
+        if (!labelText) {
+          const parentLabel = el.closest('label');
+          if (parentLabel) labelText = parentLabel.innerText || parentLabel.textContent || '';
+        }
+        if (!labelText) labelText = el.getAttribute('aria-label') || '';
+        if (!labelText) {
+          let ancestor = el.parentElement;
+          let depth = 0;
+          while (ancestor && depth < 5) {
+            const checkboxCount = ancestor.querySelectorAll('input[type="checkbox"], [role="checkbox"]').length;
+            const text = (ancestor.innerText || ancestor.textContent || '').trim().replace(/\s+/g, ' ');
+            if (checkboxCount === 1 && text.length > 0 && text.length <= 350) {
+              labelText = text;
+              break;
             }
+            ancestor = ancestor.parentElement;
+            depth++;
           }
-
-          if (!labelText) {
-            labelText = el.getAttribute('aria-label') || '';
-          }
-
-          if (!labelText) {
-            let ancestor = el.parentElement;
-            let depth = 0;
-
-            while (ancestor && depth < 5) {
-              const checkboxCount = ancestor.querySelectorAll(
-                'input[type="checkbox"], [role="checkbox"]'
-              ).length;
-
-              const text = (
-                ancestor.innerText || ancestor.textContent || ''
-              )
-                .trim()
-                .replace(/\s+/g, ' ');
-
-              if (checkboxCount === 1 && text.length > 0 && text.length <= 350) {
-                labelText = text;
-                break;
-              }
-
-              ancestor = ancestor.parentElement;
-              depth++;
-            }
-          }
-
-          return {
-            text: labelText.trim().replace(/\s+/g, ' ').slice(0, 350),
-            checked:
-              el.checked === true ||
-              el.getAttribute('aria-checked') === 'true',
-            required:
-              el.required === true ||
-              el.getAttribute('required') !== null ||
-              el.getAttribute('aria-required') === 'true'
-          };
-        });
+        }
+        return {
+          text: labelText.trim().replace(/\s+/g, ' ').slice(0, 350),
+          checked: el.checked === true || el.getAttribute('aria-checked') === 'true',
+          required: el.required === true || el.getAttribute('required') !== null ||
+            el.getAttribute('aria-required') === 'true'
+        };
+      });
 
       let info = await getInfo();
-
       if (!info.text) continue;
-
-      const isLegalAgreement =
-        legalPattern.test(info.text) &&
+      const isLegalAgreement = legalPattern.test(info.text) &&
         (acceptancePattern.test(info.text) || info.required);
-
-      const isMarketingOnly =
-        marketingPattern.test(info.text) &&
-        !legalPattern.test(info.text);
-
-      if (!isLegalAgreement || isMarketingOnly) {
-        continue;
-      }
-
+      const isMarketingOnly = marketingPattern.test(info.text) && !legalPattern.test(info.text);
+      if (!isLegalAgreement || isMarketingOnly) continue;
       legalFound = true;
 
       for (let attempt = 1; attempt <= 3 && !info.checked; attempt++) {
         console.log('Required legal agreement checkbox detected:', info.text);
-
         try {
           const tag = await checkbox.evaluate(el => el.tagName.toLowerCase());
           const type = ((await checkbox.getAttribute('type')) || '').toLowerCase();
-
-          if (tag === 'input' && type === 'checkbox') {
-            await checkbox.check({ force: attempt > 1 });
-          } else {
-            await checkbox.click({ force: attempt > 1 });
-          }
+          if (tag === 'input' && type === 'checkbox') await checkbox.check({ force: attempt > 1 });
+          else await checkbox.click({ force: attempt > 1 });
         } catch {
           const clickedLabel = await checkbox.evaluate(el => {
             let label = null;
-
-            if (el.id) {
-              label = document.querySelector(
-                `label[for="${CSS.escape(el.id)}"]`
-              );
-            }
-
+            if (el.id) label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
             label = label || el.closest('label');
             if (!label) return false;
             label.click();
             return true;
           });
-
-          if (!clickedLabel) {
-            await checkbox.click({ force: true }).catch(() => {});
-          }
+          if (!clickedLabel) await checkbox.click({ force: true }).catch(() => {});
         }
-
         await page.waitForTimeout(450);
         info = await getInfo();
       }
 
-      if (info.checked) {
-        console.log('Required legal agreement is active:', info.text);
-      } else {
+      if (info.checked) console.log('Required legal agreement is active:', info.text);
+      else {
         allLegalActive = false;
         console.log('Required legal agreement is still NOT active:', info.text);
       }
@@ -1158,202 +844,103 @@ async function inspectPage() {
       await input.evaluate(el => el.blur());
       await page.waitForTimeout(700);
     }
-
-    return {
-      found: legalFound,
-      active: !legalFound || allLegalActive
-    };
+    return { found: legalFound, active: !legalFound || allLegalActive };
   }
 
   async function findBottomPrimaryFormAction(input) {
     const inputBox = await input.boundingBox();
     if (!inputBox) return null;
-
     const metrics = await page.evaluate(() => ({
       scrollY: window.scrollY,
-      documentHeight: Math.max(
-        document.body.scrollHeight,
-        document.documentElement.scrollHeight
-      ),
+      documentHeight: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
       viewportWidth: window.innerWidth
     }));
-
-    const candidates = page.locator(
-      'button, [role="button"], input[type="submit"], input[type="button"]'
-    );
-
+    const candidates = page.locator('button, [role="button"], input[type="submit"], input[type="button"]');
     const count = await candidates.count();
     let best = null;
 
     for (let i = 0; i < count; i++) {
       const candidate = candidates.nth(i);
-
       if (!(await candidate.isVisible().catch(() => false))) continue;
-
       const box = await candidate.boundingBox();
       if (!box || box.width < 120 || box.height < 34) continue;
-
       const info = await candidate.evaluate(el => {
         const style = getComputedStyle(el);
         return {
-          text: (
-            el.innerText ||
-            el.getAttribute('aria-label') ||
-            el.getAttribute('value') ||
-            ''
-          ).trim().replace(/\s+/g, ' ').slice(0, 100),
-          disabled:
-            el.disabled === true ||
-            el.getAttribute('aria-disabled') === 'true' ||
-            style.pointerEvents === 'none',
+          text: (el.innerText || el.getAttribute('aria-label') || el.getAttribute('value') || '')
+            .trim().replace(/\s+/g, ' ').slice(0, 100),
+          disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true' || style.pointerEvents === 'none',
           opacity: Number(style.opacity || 1),
           type: (el.getAttribute('type') || '').toLowerCase()
         };
       });
-
       if (info.disabled || info.opacity < 0.35) continue;
-
       const absoluteTop = box.y + metrics.scrollY;
       const inputBottom = inputBox.y + metrics.scrollY + inputBox.height;
-
       if (absoluteTop < inputBottom - 20) continue;
-
       const absoluteBottom = absoluteTop + box.height;
-      const bottomRatio = metrics.documentHeight
-        ? absoluteBottom / metrics.documentHeight
-        : 0;
-      const widthRatio = metrics.viewportWidth
-        ? box.width / metrics.viewportWidth
-        : 0;
-
-      let score =
-        Math.min(bottomRatio, 1) * 120 +
-        Math.min(widthRatio, 1) * 45;
-
+      const bottomRatio = metrics.documentHeight ? absoluteBottom / metrics.documentHeight : 0;
+      const widthRatio = metrics.viewportWidth ? box.width / metrics.viewportWidth : 0;
+      let score = Math.min(bottomRatio, 1) * 120 + Math.min(widthRatio, 1) * 45;
       if (info.type === 'submit') score += 25;
       if (info.text.length > 0 && info.text.length <= 40) score += 5;
-
-      if (!best || score > best.score) {
-        best = { locator: candidate, text: info.text, score };
-      }
+      if (!best || score > best.score) best = { locator: candidate, text: info.text, score };
     }
-
-    if (best) {
-      console.log('Bottom primary form CTA candidate:', best.text || '(no text)');
-    }
-
+    if (best) console.log('Bottom primary form CTA candidate:', best.text || '(no text)');
     return best;
   }
 
   async function handleGenericFormInput(state) {
     const fields = page.locator(
-      'input:not([type]), ' +
-      'input[type="text"], ' +
-      'input[type="email"], ' +
-      'input[type="password"], ' +
-      'textarea'
+      'input:not([type]), input[type="text"], input[type="email"], input[type="password"], textarea'
     );
-
     const count = await fields.count();
 
     for (let i = 0; i < count; i++) {
       const input = fields.nth(i);
-
-      if (
-        !(await input.isVisible()) ||
-        !(await input.isEnabled()) ||
-        !(await input.isEditable())
-      ) {
-        continue;
-      }
-
+      if (!(await input.isVisible()) || !(await input.isEnabled()) || !(await input.isEditable())) continue;
       const info = await input.evaluate(el => {
         let labelText = '';
-
         if (el.id) {
-          const label = document.querySelector(
-            `label[for="${CSS.escape(el.id)}"]`
-          );
-
-          if (label) {
-            labelText =
-              label.innerText ||
-              label.textContent ||
-              '';
-          }
+          const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+          if (label) labelText = label.innerText || label.textContent || '';
         }
-
         if (!labelText) {
           const parentLabel = el.closest('label');
-
-          if (parentLabel) {
-            labelText =
-              parentLabel.innerText ||
-              parentLabel.textContent ||
-              '';
-          }
+          if (parentLabel) labelText = parentLabel.innerText || parentLabel.textContent || '';
         }
-
         return {
-          type:
-            (el.getAttribute('type') || 'text').toLowerCase(),
-          name:
-            (el.getAttribute('name') || '').toLowerCase(),
-          placeholder:
-            (el.getAttribute('placeholder') || '').toLowerCase(),
-          autocomplete:
-            (el.getAttribute('autocomplete') || '').toLowerCase(),
-          ariaLabel:
-            (el.getAttribute('aria-label') || '').toLowerCase(),
-          label:
-            labelText.trim().toLowerCase()
+          type: (el.getAttribute('type') || 'text').toLowerCase(),
+          name: (el.getAttribute('name') || '').toLowerCase(),
+          placeholder: (el.getAttribute('placeholder') || '').toLowerCase(),
+          autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase(),
+          ariaLabel: (el.getAttribute('aria-label') || '').toLowerCase(),
+          label: labelText.trim().toLowerCase()
         };
       });
 
-      const signals = [
-        info.name,
-        info.placeholder,
-        info.autocomplete,
-        info.ariaLabel,
-        info.label
-      ].join(' ');
-
+      const signals = [info.name, info.placeholder, info.autocomplete, info.ariaLabel, info.label].join(' ');
       let fieldType = null;
       let value = null;
-
-      if (
-        info.type === 'email' ||
-        info.autocomplete === 'email' ||
-        /\be-?mail\b/i.test(signals)
-      ) {
+      if (info.type === 'email' || info.autocomplete === 'email' || /\be-?mail\b/i.test(signals)) {
         fieldType = 'email';
         value = RUN_EMAIL;
       } else if (
         info.type === 'password' ||
         ['new-password', 'current-password'].includes(info.autocomplete) ||
-        /\b(password|passcode|create password|confirm password)\b/i.test(signals)
+        /\b(password|passcode|create[\s_-]*password|confirm[\s_-]*password)\b/i.test(signals)
       ) {
         fieldType = 'password';
         value = RUN_PASSWORD;
       } else if (
-        [
-          'name',
-          'given-name',
-          'first-name'
-        ].includes(info.autocomplete) ||
-        /\b(first[\s_-]*name|your[\s_-]*name|name)\b/i
-          .test(signals)
+        ['name','given-name','first-name'].includes(info.autocomplete) ||
+        /\b(first[\s_-]*name|your[\s_-]*name|name)\b/i.test(signals)
       ) {
         fieldType = 'name';
         value = 'Alex';
       }
-
-      if (!value) {
-        continue;
-      }
-
+      if (!value) continue;
       console.log(`Detected ${fieldType} input.`);
-
       await input.fill(value);
 
       if (fieldType === 'password') {
@@ -1362,7 +949,6 @@ async function inspectPage() {
           valid: el.validity ? el.validity.valid : null,
           validationMessage: el.validationMessage || ''
         }));
-
         console.log('PASSWORD DEBUG - generated password length:', passwordState.length);
         console.log('PASSWORD DEBUG - browser validity:', passwordState.valid);
         console.log('PASSWORD DEBUG - validation message:', passwordState.validationMessage || '(none)');
@@ -1374,14 +960,10 @@ async function inspectPage() {
           valid: el.validity ? el.validity.valid : null,
           validationMessage: el.validationMessage || ''
         }));
-
         console.log('EMAIL DEBUG - intended value:', value);
         console.log('EMAIL DEBUG - actual field value:', actualEmailState.value);
         console.log('EMAIL DEBUG - browser valid:', actualEmailState.valid);
-        console.log(
-          'EMAIL DEBUG - validation message:',
-          actualEmailState.validationMessage || '(none)'
-        );
+        console.log('EMAIL DEBUG - validation message:', actualEmailState.validationMessage || '(none)');
       }
 
       await input.evaluate(el => {
@@ -1389,120 +971,47 @@ async function inspectPage() {
         el.dispatchEvent(new Event('change', { bubbles: true }));
         el.blur();
       });
-
       await page.waitForTimeout(500);
 
-      const agreementState =
-        await handleRequiredAgreementCheckboxes(input);
-
-      if (!agreementState.active) {
-        console.log(
-          'Required terms/privacy agreement could not be activated.'
-        );
-        return { recognized: true, advanced: false };
-      }
-
+      const agreementState = await handleRequiredAgreementCheckboxes(input);
+      if (!agreementState.active) return { recognized: true, advanced: false };
       const beforeSubmitState = await inspectPage();
       const beforeSignature = pageSignature(beforeSubmitState);
-
       const form = input.locator('xpath=ancestor::form[1]');
 
       if ((await form.count()) > 0) {
-        const submit = form.locator(
-          'button[type="submit"], ' +
-          'input[type="submit"], ' +
-          'button:not([type])'
-        ).first();
-
-        if (
-          (await submit.count()) > 0 &&
-          (await submit.isVisible()) &&
-          (await submit.isEnabled())
-        ) {
-          console.log(
-            `Submitting ${fieldType} using form submit control.`
-          );
-
-          const termsBeforeSubmit =
-            await handleRequiredAgreementCheckboxes(input);
-
-          if (!termsBeforeSubmit.active) {
-            return { recognized: true, advanced: false };
-          }
-
+        const submit = form.locator('button[type="submit"], input[type="submit"], button:not([type])').first();
+        if ((await submit.count()) > 0 && (await submit.isVisible()) && (await submit.isEnabled())) {
+          const termsBeforeSubmit = await handleRequiredAgreementCheckboxes(input);
+          if (!termsBeforeSubmit.active) return { recognized: true, advanced: false };
           await safeCrawlerClick(submit, 'form submit control');
-
-          if (await waitForAdvancement(beforeSignature)) {
-            return { recognized: true, advanced: true };
-          }
+          if (await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
         }
-
         const submitted = await input.evaluate(el => {
           const formEl = el.closest('form');
-
-          if (!formEl) {
-            return false;
-          }
-
+          if (!formEl) return false;
           formEl.requestSubmit();
           return true;
         });
-
-        if (submitted) {
-          console.log(
-            `Submitting ${fieldType} using native form submission.`
-          );
-
-          if (await waitForAdvancement(beforeSignature)) {
-            return { recognized: true, advanced: true };
-          }
-        }
-      }
-
-      const nearbyAction =
-        await findBottomPrimaryFormAction(input);
-
-      if (nearbyAction) {
-        console.log(
-          `Submitting ${fieldType} using bottom primary CTA:`,
-          nearbyAction.text || '(no text)'
-        );
-
-        const termsBeforeNearbyAction =
-          await handleRequiredAgreementCheckboxes(input);
-
-        if (!termsBeforeNearbyAction.active) {
-          return { recognized: true, advanced: false };
-        }
-
-        await safeCrawlerClick(
-          nearbyAction.locator,
-          nearbyAction.text || 'bottom primary CTA'
-        );
-
-        if (await waitForAdvancement(beforeSignature)) {
+        if (submitted && await waitForAdvancement(beforeSignature)) {
           return { recognized: true, advanced: true };
         }
       }
 
-      const termsBeforeEnter =
-        await handleRequiredAgreementCheckboxes(input);
-
-      if (!termsBeforeEnter.active) {
-        return { recognized: true, advanced: false };
+      const nearbyAction = await findBottomPrimaryFormAction(input);
+      if (nearbyAction) {
+        const termsBeforeNearbyAction = await handleRequiredAgreementCheckboxes(input);
+        if (!termsBeforeNearbyAction.active) return { recognized: true, advanced: false };
+        await safeCrawlerClick(nearbyAction.locator, nearbyAction.text || 'bottom primary CTA');
+        if (await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
       }
 
+      const termsBeforeEnter = await handleRequiredAgreementCheckboxes(input);
+      if (!termsBeforeEnter.active) return { recognized: true, advanced: false };
       console.log(`Trying Enter for ${fieldType} input.`);
       await input.press('Enter');
-
-      if (await waitForAdvancement(beforeSignature)) {
-        return { recognized: true, advanced: true };
-      }
-
-      console.log(
-        `Unable to safely submit ${fieldType} field.`
-      );
-
+      if (await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
+      console.log(`Unable to safely submit ${fieldType} field.`);
       return { recognized: true, advanced: false };
     }
 
@@ -1510,121 +1019,73 @@ async function inspectPage() {
   }
 
   async function advanceOneScreen(state) {
+    const handledEnglishLanguageChoice = await handleEnglishLanguageChoice();
+    if (handledEnglishLanguageChoice) return true;
+
     if (isNativeLanguageQuestion(state.pageText)) {
-      const handledCustomLanguage =
-        await handleCustomNativeLanguage(state);
-
-      if (handledCustomLanguage) {
-        return true;
-      }
+      const handledCustomLanguage = await handleCustomNativeLanguage(state);
+      if (handledCustomLanguage) return true;
     }
-
-    if (state.group.length > 0) {
-      return await handleAnswerGroup(state);
-    }
-
-    const formResult =
-      await handleGenericFormInput(state);
-
-    if (formResult.recognized) {
-      return formResult.advanced;
-    }
+    if (state.group.length > 0) return await handleAnswerGroup(state);
+    const formResult = await handleGenericFormInput(state);
+    if (formResult.recognized) return formResult.advanced;
 
     if (state.cta) {
-      console.log(
-        'Primary CTA detected:',
-        state.cta.text || '(no text)'
-      );
-
+      console.log('Primary CTA detected:', state.cta.text || '(no text)');
       const beforeSignature = pageSignature(state);
-
       await safeCrawlerClick(
-        page.locator(
-          `[data-auto-id="${state.cta.id}"]`
-        ),
+        page.locator(`[data-auto-id="${state.cta.id}"]`),
         state.cta.text || 'primary CTA'
       );
-
       await page.waitForTimeout(900);
-
-      return (
-        pageSignature(await inspectPage()) !==
-        beforeSignature
-      );
+      return pageSignature(await inspectPage()) !== beforeSignature;
     }
 
     const delayedResult = await waitForActionableState();
-
-    if (!delayedResult) {
-      return false;
-    }
-
-    if (delayedResult.changed) {
-      return true;
-    }
-
+    if (!delayedResult) return false;
+    if (delayedResult.changed) return true;
     return await advanceOneScreen(delayedResult.state);
   }
 
   const MAX_SCREENS = 100;
-
-  for (
-    let screenNumber = 1;
-    screenNumber <= MAX_SCREENS;
-    screenNumber++
-  ) {
+  for (let screenNumber = 1; screenNumber <= MAX_SCREENS; screenNumber++) {
     await waitForVisualSettle();
-
     await dismissBlockingConsentOverlay();
-
     const state = await inspectPage();
+    const paywallState = await inspectPaywallState();
 
-    const filename =
-      `${String(screenNumber).padStart(2, '0')}.png`;
+    if (paywallState.isPagePaywall) {
+      await capturePaywallPdf(screenNumber, paywallState);
+      console.log('Stopping after paywall capture to avoid payment-loop screenshots.');
+      break;
+    }
 
-    await page.screenshot({
-      path: filename,
-      fullPage: true
-    });
-
+    const filename = `${String(screenNumber).padStart(2, '0')}.png`;
+    await page.screenshot({ path: filename, fullPage: true });
     console.log(`\nCaptured ${filename}`);
-
     console.log({
       url: page.url(),
       CTA: state.cta?.text || null,
-      answerOptions:
-        state.group.map(x => x.text)
+      answerOptions: state.group.map(x => x.text)
     });
 
     const beforeSignature = pageSignature(state);
-
     const acted = await advanceOneScreen(state);
-
     if (!acted) {
-      console.log(
-        'No safe interaction pattern detected. Stopping.'
-      );
+      console.log('No safe interaction pattern detected. Stopping.');
       break;
     }
-
     const afterState = await inspectPage();
     const afterSignature = pageSignature(afterState);
-
     if (afterSignature === beforeSignature) {
-      console.log(
-        'No page advancement detected. Stopping safely.'
-      );
+      console.log('No page advancement detected. Stopping safely.');
       break;
     }
-
     if (screenNumber === MAX_SCREENS) {
-      console.log(
-        `Reached safety cap of ${MAX_SCREENS} screens.`
-      );
+      console.log(`Reached safety cap of ${MAX_SCREENS} screens.`);
     }
   }
 
   await browser.close();
-
   console.log('Crawler finished.');
 })();
