@@ -82,6 +82,22 @@ function getSelectionInstruction(text) {
   return { minSelections: 1, maxSelections: 1, reason: 'default single selection' };
 }
 
+function isPassiveTransitionScreen(text) {
+  const normalized = (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!normalized) return false;
+
+  const passiveSignals = [
+    /\b(crafting|creating|generating|building|preparing|personalizing|personalising|analyzing|analysing|processing|loading|calculating|finalizing|finalising)\b/,
+    /\b(putting together|setting up)\b/,
+    /\bplease wait\b/,
+    /\balmost (?:done|ready|there)\b/,
+    /\bhang tight\b/,
+    /\bthis may take (?:a|few|some) (?:moment|moments|second|seconds|minute|minutes)\b/
+  ];
+
+  return passiveSignals.some(pattern => pattern.test(normalized));
+}
+
 (async () => {
   const url = process.argv[2];
   if (!url) {
@@ -662,16 +678,46 @@ function getSelectionInstruction(text) {
     const startedAt = Date.now();
     const initialState = await inspectPage();
     const initialSignature = pageSignature(initialState);
-    console.log(`No action available yet. Watching for up to ${timeoutMs / 1000}s...`);
-    while (Date.now() - startedAt < timeoutMs) {
+    const initialUrl = page.url();
+    const passiveTransition = isPassiveTransitionScreen(initialState.pageText);
+    const effectiveTimeoutMs = passiveTransition ? Math.max(timeoutMs, 60000) : timeoutMs;
+
+    if (passiveTransition) {
+      console.log('Passive transition screen detected. Waiting for automatic navigation or completion.');
+      console.log(`Watching for up to ${effectiveTimeoutMs / 1000}s...`);
+    } else {
+      console.log(`No action available yet. Watching for up to ${effectiveTimeoutMs / 1000}s...`);
+    }
+
+    while (Date.now() - startedAt < effectiveTimeoutMs) {
       await page.waitForTimeout(pollMs);
       const state = await inspectPage();
       const signature = pageSignature(state);
       const actionable = state.group.length > 0 || state.cta !== null || isNativeLanguageQuestion(state.pageText);
-      if (actionable) return { state, changed: signature !== initialSignature };
+
+      if (actionable) {
+        if (passiveTransition) console.log('Passive transition completed: actionable screen appeared.');
+        return { state, changed: signature !== initialSignature };
+      }
+
+      if (passiveTransition) {
+        const urlChanged = page.url() !== initialUrl;
+        const stillPassive = isPassiveTransitionScreen(state.pageText);
+        if (urlChanged || !stillPassive) {
+          console.log('Automatic page transition detected. Continuing crawl.');
+          return { state, changed: true };
+        }
+        continue;
+      }
+
       if (signature !== initialSignature) return { state, changed: true };
     }
-    console.log(`Nothing actionable or transitional appeared after ${timeoutMs / 1000}s.`);
+
+    if (passiveTransition) {
+      console.log(`Passive transition did not complete after ${effectiveTimeoutMs / 1000}s.`);
+    } else {
+      console.log(`Nothing actionable or transitional appeared after ${effectiveTimeoutMs / 1000}s.`);
+    }
     return null;
   }
 
