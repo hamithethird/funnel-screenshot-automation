@@ -110,6 +110,32 @@ function generateRandomAsciiString(length = 16) {
 
 const RUN_EMAIL = `${generateRandomAsciiString(16)}@gmail.com`;
 
+function generateRunPassword(length = 16) {
+  const lowercase = 'abcdefghijklmnopqrstuvwxyz';
+  const uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const digits = '0123456789';
+  const all = lowercase + uppercase + digits;
+
+  const chars = [
+    uppercase[Math.floor(Math.random() * uppercase.length)],
+    digits[Math.floor(Math.random() * digits.length)],
+    lowercase[Math.floor(Math.random() * lowercase.length)]
+  ];
+
+  while (chars.length < Math.max(length, 8)) {
+    chars.push(all[Math.floor(Math.random() * all.length)]);
+  }
+
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+
+  return chars.join('');
+}
+
+const RUN_PASSWORD = generateRunPassword(16);
+
 async function dismissBlockingConsentOverlay() {
   const overlaySelectors = [
     '[role="dialog"]',
@@ -476,8 +502,6 @@ async function inspectPage() {
       const centerY = item.top + item.height / 2;
       const widthRatio = item.width / vw;
 
-      // Primary navigation CTAs are usually near the bottom of onboarding screens.
-      // This is a strong prior, but answer-group members were already excluded above.
       if (centerY > vh * 0.82) {
         score += 90;
       } else if (centerY > vh * 0.68) {
@@ -1226,6 +1250,7 @@ async function inspectPage() {
       'input:not([type]), ' +
       'input[type="text"], ' +
       'input[type="email"], ' +
+      'input[type="password"], ' +
       'textarea'
     );
 
@@ -1304,6 +1329,13 @@ async function inspectPage() {
         fieldType = 'email';
         value = RUN_EMAIL;
       } else if (
+        info.type === 'password' ||
+        ['new-password', 'current-password'].includes(info.autocomplete) ||
+        /\b(password|passcode|create password|confirm password)\b/i.test(signals)
+      ) {
+        fieldType = 'password';
+        value = RUN_PASSWORD;
+      } else if (
         [
           'name',
           'given-name',
@@ -1324,6 +1356,18 @@ async function inspectPage() {
 
       await input.fill(value);
 
+      if (fieldType === 'password') {
+        const passwordState = await input.evaluate(el => ({
+          length: el.value.length,
+          valid: el.validity ? el.validity.valid : null,
+          validationMessage: el.validationMessage || ''
+        }));
+
+        console.log('PASSWORD DEBUG - generated password length:', passwordState.length);
+        console.log('PASSWORD DEBUG - browser validity:', passwordState.valid);
+        console.log('PASSWORD DEBUG - validation message:', passwordState.validationMessage || '(none)');
+      }
+
       if (fieldType === 'email') {
         const actualEmailState = await input.evaluate(el => ({
           value: el.value,
@@ -1340,7 +1384,6 @@ async function inspectPage() {
         );
       }
 
-      // Trigger the validation/update patterns used by many React/Vue forms.
       await input.evaluate(el => {
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1362,7 +1405,6 @@ async function inspectPage() {
       const beforeSubmitState = await inspectPage();
       const beforeSignature = pageSignature(beforeSubmitState);
 
-      // 1. Prefer an actual submit control in the same HTML form.
       const form = input.locator('xpath=ancestor::form[1]');
 
       if ((await form.count()) > 0) {
@@ -1417,10 +1459,6 @@ async function inspectPage() {
         }
       }
 
-      // 2. Some funnels use a button outside a literal <form>.
-      // Only consider substantial button-like controls near/below the field.
-      // Anchors are intentionally excluded, so Privacy Policy / Terms links
-      // can never be used as form submission actions.
       const nearbyAction =
         await findBottomPrimaryFormAction(input);
 
@@ -1447,7 +1485,6 @@ async function inspectPage() {
         }
       }
 
-      // 3. Enter is the final safe fallback for a recognized field.
       const termsBeforeEnter =
         await handleRequiredAgreementCheckboxes(input);
 
@@ -1466,9 +1503,6 @@ async function inspectPage() {
         `Unable to safely submit ${fieldType} field.`
       );
 
-      // Important: a recognized form that cannot be safely submitted must
-      // NOT fall through to the page-level CTA detector. That is how legal
-      // links such as Privacy Policy were previously clicked by mistake.
       return { recognized: true, advanced: false };
     }
 
