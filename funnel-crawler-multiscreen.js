@@ -287,12 +287,6 @@ async function inspectPage() {
       })
       .filter(Boolean);
 
-    // -----------------------------------
-    // GROUPED ANSWER OPTIONS FIRST
-    // -----------------------------------
-    // Buttons and role=button elements are allowed here. Many funnels
-    // implement answer cards as buttons, so tag semantics alone cannot
-    // decide whether a control is navigation.
     const groups = new Map();
 
     for (const item of controls) {
@@ -351,8 +345,6 @@ async function inspectPage() {
         continue;
       }
 
-      // A repeated set of similarly sized controls is strong answer-card
-      // evidence, including when those controls are technically buttons.
       let score =
         50 + Math.min(items.length * 5, 35);
 
@@ -392,12 +384,6 @@ async function inspectPage() {
         : []
     );
 
-    // -----------------------------------
-    // PRIMARY NAVIGATION CTA SECOND
-    // -----------------------------------
-    // Anything already classified as part of the answer group is excluded
-    // from CTA scoring. This prevents answer-card buttons from competing
-    // with the actual navigation CTA.
     let bestCTA = null;
 
     for (const item of controls) {
@@ -450,7 +436,6 @@ async function inspectPage() {
         score += 20;
       }
 
-      // Tiny/inline controls are poor CTA candidates.
       if (
         item.width < 80 ||
         item.height < 25
@@ -458,8 +443,6 @@ async function inspectPage() {
         score -= 50;
       }
 
-      // Anchors are allowed as CTAs, but small anchors near the bottom are
-      // commonly footer/legal links and need a strong structural penalty.
       if (
         item.tag === 'a' &&
         (
@@ -747,7 +730,7 @@ async function inspectPage() {
 
       await page.waitForTimeout(600);
 
-      let afterSelection = await inspectPage();
+      const afterSelection = await inspectPage();
 
       if (!afterSelection.group.length) {
         return true;
@@ -919,6 +902,96 @@ async function inspectPage() {
     return false;
   }
 
+  async function findSafeFormActionNearInput(input) {
+    const inputBox = await input.boundingBox();
+
+    if (!inputBox) {
+      return null;
+    }
+
+    const candidates = page.locator(
+      'button, [role="button"], ' +
+      'input[type="submit"], input[type="button"]'
+    );
+
+    const count = await candidates.count();
+    let best = null;
+
+    for (let i = 0; i < count; i++) {
+      const candidate = candidates.nth(i);
+
+      if (
+        !(await candidate.isVisible()) ||
+        !(await candidate.isEnabled())
+      ) {
+        continue;
+      }
+
+      const box = await candidate.boundingBox();
+
+      if (!box) {
+        continue;
+      }
+
+      const text = (
+        (await candidate.innerText().catch(() => '')) ||
+        (await candidate.getAttribute('aria-label')) ||
+        (await candidate.getAttribute('value')) ||
+        ''
+      ).trim();
+
+      const verticalGap =
+        box.y - (inputBox.y + inputBox.height);
+
+      const overlapsBelow =
+        verticalGap >= -10 &&
+        verticalGap <= 260;
+
+      const similarHorizontalRegion =
+        Math.abs(box.x - inputBox.x) <= 100;
+
+      const substantialSize =
+        box.width >= Math.min(inputBox.width * 0.5, 140) &&
+        box.height >= 32;
+
+      if (
+        !overlapsBelow ||
+        !similarHorizontalRegion ||
+        !substantialSize
+      ) {
+        continue;
+      }
+
+      let score = 0;
+
+      score += Math.max(0, 120 - Math.max(0, verticalGap));
+      score += Math.min(box.width, 300) / 10;
+
+      const type = (
+        (await candidate.getAttribute('type')) ||
+        ''
+      ).toLowerCase();
+
+      if (type === 'submit') {
+        score += 40;
+      }
+
+      if (text.length > 0 && text.length <= 40) {
+        score += 10;
+      }
+
+      if (!best || score > best.score) {
+        best = {
+          locator: candidate,
+          text,
+          score
+        };
+      }
+    }
+
+    return best;
+  }
+
   async function handleGenericFormInput(state) {
     const fields = page.locator(
       'input:not([type]), ' +
@@ -1021,11 +1094,20 @@ async function inspectPage() {
       console.log(`Detected ${fieldType} input.`);
 
       await input.fill(value);
-      await page.waitForTimeout(400);
+
+      // Trigger the validation/update patterns used by many React/Vue forms.
+      await input.evaluate(el => {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.blur();
+      });
+
+      await page.waitForTimeout(500);
 
       const beforeSubmitState = await inspectPage();
       const beforeSignature = pageSignature(beforeSubmitState);
 
+      // 1. Prefer an actual submit control in the same HTML form.
       const form = input.locator('xpath=ancestor::form[1]');
 
       if ((await form.count()) > 0) {
@@ -1047,7 +1129,7 @@ async function inspectPage() {
           await submit.click();
 
           if (await waitForAdvancement(beforeSignature)) {
-            return true;
+            return { recognized: true, advanced: true };
           }
         }
 
@@ -1068,45 +1150,50 @@ async function inspectPage() {
           );
 
           if (await waitForAdvancement(beforeSignature)) {
-            return true;
+            return { recognized: true, advanced: true };
           }
         }
       }
 
-      const afterFill = await inspectPage();
+      // 2. Some funnels use a button outside a literal <form>.
+      // Only consider substantial button-like controls near/below the field.
+      // Anchors are intentionally excluded, so Privacy Policy / Terms links
+      // can never be used as form submission actions.
+      const nearbyAction =
+        await findSafeFormActionNearInput(input);
 
-      if (afterFill.cta) {
+      if (nearbyAction) {
         console.log(
-          `Submitting ${fieldType} using structural CTA:`,
-          afterFill.cta.text || '(no text)'
+          `Submitting ${fieldType} using nearby button:`,
+          nearbyAction.text || '(no text)'
         );
 
-        await page
-          .locator(
-            `[data-auto-id="${afterFill.cta.id}"]`
-          )
-          .click();
+        await nearbyAction.locator.click();
 
         if (await waitForAdvancement(beforeSignature)) {
-          return true;
+          return { recognized: true, advanced: true };
         }
       }
 
+      // 3. Enter is the final safe fallback for a recognized field.
       console.log(`Trying Enter for ${fieldType} input.`);
       await input.press('Enter');
 
       if (await waitForAdvancement(beforeSignature)) {
-        return true;
+        return { recognized: true, advanced: true };
       }
 
       console.log(
         `Unable to safely submit ${fieldType} field.`
       );
 
-      return false;
+      // Important: a recognized form that cannot be safely submitted must
+      // NOT fall through to the page-level CTA detector. That is how legal
+      // links such as Privacy Policy were previously clicked by mistake.
+      return { recognized: true, advanced: false };
     }
 
-    return false;
+    return { recognized: false, advanced: false };
   }
 
   async function advanceOneScreen(state) {
@@ -1123,11 +1210,11 @@ async function inspectPage() {
       return await handleAnswerGroup(state);
     }
 
-    const handledFormInput =
+    const formResult =
       await handleGenericFormInput(state);
 
-    if (handledFormInput) {
-      return true;
+    if (formResult.recognized) {
+      return formResult.advanced;
     }
 
     if (state.cta) {
