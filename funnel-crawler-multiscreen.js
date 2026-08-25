@@ -1539,13 +1539,16 @@ function sanitizeUrl(rawUrl) {
     const scratchResult = await handleScratchReveal(screenNumber, state);
     if (scratchResult.handled) return scratchResult.advanced;
 
+    // Foreground forms must outrank navigation controls that may still exist
+    // behind an overlay (for example, an email gate covering a prior Continue button).
+    const formResult = await handleGenericFormInput(state);
+    if (formResult.recognized) return formResult.advanced;
+
     const navigationResult = await clickStrongNavigation(state);
     if (navigationResult.handled) return navigationResult.advanced;
 
     state = await inspectPage();
     if (state.group.length > 0) return await handleAnswerGroup(state, screenNumber);
-    const formResult = await handleGenericFormInput(state);
-    if (formResult.recognized) return formResult.advanced;
     if (state.cta) {
       console.log('Primary CTA detected:', state.cta.text || '(no text)');
       const beforeSignature = pageSignature(state);
