@@ -177,6 +177,15 @@ function contextSimilarity(a, b) {
   return Math.max(jaccard, containment * 0.92);
 }
 
+function sanitizeUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return rawUrl || '';
+  }
+}
+
 (async () => {
   const url = process.argv[2];
   if (!url) {
@@ -233,6 +242,14 @@ function contextSimilarity(a, b) {
     const seen = supplementalFingerprintsByScreen.get(screenNumber) || [];
     const match = seen.find(existing => contextSimilarity(existing, fingerprint) >= threshold);
     if (match) return true;
+    seen.push(fingerprint);
+    supplementalFingerprintsByScreen.set(screenNumber, seen);
+    return false;
+  }
+
+  function supplementalFingerprintSeenExact(screenNumber, fingerprint) {
+    const seen = supplementalFingerprintsByScreen.get(screenNumber) || [];
+    if (seen.includes(fingerprint)) return true;
     seen.push(fingerprint);
     supplementalFingerprintsByScreen.set(screenNumber, seen);
     return false;
@@ -303,14 +320,25 @@ function contextSimilarity(a, b) {
       return true;
     } catch (error) {
       const message = String(error?.message || error);
-      if (!/intercepts pointer events|another element/i.test(message)) throw error;
-      console.log('Click blocked while targeting:', description);
-      const dismissed = await dismissBlockingConsentOverlay();
-      if (!dismissed) throw error;
-      console.log('Retrying original click after modal dismissal:', description);
-      await locator.click({ timeout: 7000 });
-      await silenceMedia();
-      return true;
+      if (/intercepts pointer events|another element/i.test(message)) {
+        console.log('Click blocked while targeting:', description);
+        const dismissed = await dismissBlockingConsentOverlay();
+        if (!dismissed) return false;
+        console.log('Retrying original click after modal dismissal:', description);
+        try {
+          await locator.click({ timeout: 7000 });
+          await silenceMedia();
+          return true;
+        } catch (retryError) {
+          console.log('Retry failed for:', description, '-', String(retryError?.message || retryError).split('\n')[0]);
+          return false;
+        }
+      }
+      if (/Timeout|strict mode violation|waiting for locator|resolved to 0 elements|detached|not attached/i.test(message)) {
+        console.log('Click target became stale/unavailable:', description);
+        return false;
+      }
+      throw error;
     }
   }
 
@@ -397,22 +425,23 @@ function contextSimilarity(a, b) {
     const beforeState = await inspectPage();
     const beforeSignature = pageSignature(beforeState);
     const target = page.locator(`[data-language-choice-id="${result.value}"]`);
-    await safeCrawlerClick(target, 'English language option');
+    const clicked = await safeCrawlerClick(target, 'English language option');
+    if (!clicked) return false;
     await page.waitForTimeout(700);
     let afterState = await inspectPage();
     if (pageSignature(afterState) !== beforeSignature) {
       console.log('English language selected.');
       if (afterState.cta) {
         const beforeCTA = pageSignature(afterState);
-        await safeCrawlerClick(page.locator(`[data-auto-id="${afterState.cta.id}"]`), afterState.cta.text || 'language-choice CTA');
-        await waitForAdvancement(beforeCTA, 7000);
+        const ctaClicked = await safeCrawlerClick(page.locator(`[data-auto-id="${afterState.cta.id}"]`), afterState.cta.text || 'language-choice CTA');
+        if (ctaClicked) await waitForAdvancement(beforeCTA, 7000);
       }
       return true;
     }
     afterState = await inspectPage();
     if (afterState.cta) {
-      await safeCrawlerClick(page.locator(`[data-auto-id="${afterState.cta.id}"]`), afterState.cta.text || 'language-choice CTA');
-      return true;
+      const ctaClicked = await safeCrawlerClick(page.locator(`[data-auto-id="${afterState.cta.id}"]`), afterState.cta.text || 'language-choice CTA');
+      return ctaClicked;
     }
     return true;
   }
@@ -467,8 +496,7 @@ function contextSimilarity(a, b) {
     return await page.evaluate(() => {
       const vw = window.innerWidth;
       const vh = window.innerHeight;
-      document.querySelectorAll('[data-auto-id]').forEach(el => el.removeAttribute('data-auto-id'));
-      const inspectionId = `${Date.now()}-${Math.floor(Math.random() * 1000000000)}`;
+      window.__crawlerAutoCounter = window.__crawlerAutoCounter || 0;
       const all = Array.from(document.querySelectorAll('*'));
       const pageText = document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 3000);
       const questionSignals = /\b(select all that apply|choose all that apply|select any|choose any|select one|choose one|pick one|choose\s+\d+|select\s+\d+|pick\s+\d+|or more|at least|which|what(?:'s| is| are| do| would)|how (?:often|do|would|well|much))\b/i;
@@ -502,8 +530,12 @@ function contextSimilarity(a, b) {
         const mediaElement = tag === 'audio' || tag === 'video';
         const explicitMediaControl = mediaElement || mediaOnlyText.test(text) || mediaOnlyText.test(aria);
         if (explicitMediaControl && !answerControl) return null;
-        const id = `${inspectionId}-auto-${index}`;
-        el.setAttribute('data-auto-id', id);
+        let id = el.getAttribute('data-auto-id');
+        if (!id) {
+          window.__crawlerAutoCounter += 1;
+          id = `crawler-auto-${window.__crawlerAutoCounter}`;
+          el.setAttribute('data-auto-id', id);
+        }
         return {
           id,
           parentId: el.parentElement ? all.indexOf(el.parentElement) : null,
@@ -560,7 +592,6 @@ function contextSimilarity(a, b) {
       let bestGroup = null;
       for (const items of groups.values()) {
         if (items.length < 2 || items.length > 24) continue;
-        if (items.some(item => navigationText.test((item.text || '').trim()))) continue;
         const avgWidth = items.reduce((sum, x) => sum + x.width, 0) / items.length;
         const avgHeight = items.reduce((sum, x) => sum + x.height, 0) / items.length;
         const similarSizes = items.every(item =>
@@ -597,7 +628,7 @@ function contextSimilarity(a, b) {
         else if (widthRatio >= 0.5) score += 20;
         if (item.height >= 40 && item.height <= 100) score += 20;
         if (item.navigationControl) score += 20;
-        if (navigationText.test(item.text.trim())) score += 80;
+        if (navigationText.test(item.text.trim())) score += 60;
         if (item.text.length > 0 && item.text.length <= 50) score += 10;
         if (item.inputType === 'submit' || item.inputType === 'button') score += 20;
         if (item.width < 80 || item.height < 25) score -= 50;
@@ -614,7 +645,7 @@ function contextSimilarity(a, b) {
   }
 
   function pageSignature(state) {
-    return `${page.url()}\n${state.pageText}`;
+    return `${sanitizeUrl(page.url())}\n${state.pageText}`;
   }
 
   async function findBottomNavigationFallback() {
@@ -652,22 +683,25 @@ function contextSimilarity(a, b) {
   }
 
   async function clickStrongNavigation(state, description = 'primary navigation CTA') {
-    if (state?.cta && isStrongNavigationText(state.cta.text)) {
-      console.log('Strong navigation CTA detected:', state.cta.text);
-      const before = pageSignature(state);
-      await safeCrawlerClick(page.locator(`[data-auto-id="${state.cta.id}"]`), state.cta.text || description);
-      await page.waitForTimeout(900);
-      return pageSignature(await inspectPage()) !== before;
-    }
-
+    const hasStrongCTA = state?.cta && isStrongNavigationText(state.cta.text);
     const fallback = await findBottomNavigationFallback();
-    if (!fallback) return false;
-    console.log('Bottom primary navigation fallback detected:', fallback.text);
+    if (!hasStrongCTA && !fallback) return { handled: false, advanced: false };
+
+    const target = fallback;
+    if (!target) return { handled: false, advanced: false };
+    console.log(hasStrongCTA ? 'Strong navigation CTA detected:' : 'Bottom primary navigation fallback detected:', target.text);
+
     const beforeState = await inspectPage();
     const before = pageSignature(beforeState);
-    await safeCrawlerClick(page.locator(`[data-bottom-navigation-id="${fallback.id}"]`), fallback.text || description);
-    await page.waitForTimeout(900);
-    return pageSignature(await inspectPage()) !== before;
+    const clicked = await safeCrawlerClick(
+      page.locator(`[data-bottom-navigation-id="${target.id}"]`),
+      target.text || description
+    );
+    if (!clicked) return { handled: true, advanced: false };
+
+    const advanced = await waitForAdvancement(before, 12000);
+    if (!advanced) console.log('Navigation CTA was clicked, but no meaningful page advancement was detected.');
+    return { handled: true, advanced };
   }
 
   async function captureSupplementalState(screenNumber, state, reason, removeTexts = [], threshold = 0.95) {
@@ -729,7 +763,7 @@ function contextSimilarity(a, b) {
     if (!isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state)) return false;
     const result = await page.evaluate(() => {
       const escapePattern = /^(skip|skip for now|not now|maybe later|later|do this later|do it later|continue without(?: this)?|continue without speaking|no thanks|no, thanks|i'll do this later|i will do this later)$/i;
-      const elements = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"]'));
+      const elements = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], [onclick], [tabindex]'));
       const candidates = [];
       for (let i = 0; i < elements.length; i++) {
         const el = elements[i];
@@ -756,13 +790,14 @@ function contextSimilarity(a, b) {
     });
 
     if (!result) {
-      console.log('Optional input/assessment screen detected, but no safe skip option was found.');
+      if (isSpeechInputScreen(state.pageText)) console.log('Optional input/assessment screen detected, but no safe skip option was found.');
       return false;
     }
 
     console.log('Optional input/assessment requirement detected. Using escape option:', result.text);
     const before = pageSignature(state);
-    await safeCrawlerClick(page.locator(`[data-skip-input-id="${result.id}"]`), result.text || 'skip input');
+    const clicked = await safeCrawlerClick(page.locator(`[data-skip-input-id="${result.id}"]`), result.text || 'skip input');
+    if (!clicked) return false;
     return await waitForAdvancement(before, 12000);
   }
 
@@ -816,8 +851,8 @@ function contextSimilarity(a, b) {
         const afterSelection = await inspectPage();
         if (afterSelection.cta) {
           const beforeCTA = pageSignature(afterSelection);
-          await safeCrawlerClick(page.locator(`[data-auto-id="${afterSelection.cta.id}"]`), afterSelection.cta.text || 'answer-group CTA');
-          if (await waitForAdvancement(beforeCTA, 10000)) return true;
+          const ctaClicked = await safeCrawlerClick(page.locator(`[data-auto-id="${afterSelection.cta.id}"]`), afterSelection.cta.text || 'answer-group CTA');
+          if (ctaClicked && await waitForAdvancement(beforeCTA, 10000)) return true;
           return false;
         }
         return true;
@@ -829,7 +864,7 @@ function contextSimilarity(a, b) {
   async function handleAnswerGroup(state, screenNumber = null) {
     const initialSignature = pageSignature(state);
     const initialState = state;
-    const initialUrl = page.url();
+    const initialUrl = sanitizeUrl(page.url());
     const instruction = getSelectionInstruction(state.pageText);
     const availableAtStart = Math.max(state.group.length, 1);
     const minSelections = Math.max(1, Math.min(instruction.minSelections || 1, availableAtStart));
@@ -870,12 +905,13 @@ function contextSimilarity(a, b) {
       if (!option) break;
       const optionKey = ((option.text || '').trim().toLowerCase() || option.id);
       console.log(`Selecting option ${selectedKeys.size + 1}:`, option.text || '[no visible text]');
-      await safeCrawlerClick(page.locator(`[data-auto-id="${option.id}"]`), option.text || 'answer option');
+      const clicked = await safeCrawlerClick(page.locator(`[data-auto-id="${option.id}"]`), option.text || 'answer option');
+      if (!clicked) return false;
       selectedKeys.add(optionKey);
       await page.waitForTimeout(650);
 
       const afterSelection = await inspectPage();
-      const samePageSelectionState = page.url() === initialUrl && afterSelection.group.length > 0;
+      const samePageSelectionState = sanitizeUrl(page.url()) === initialUrl && afterSelection.group.length > 0;
       const contextChanged = normalizeContextText(afterSelection.pageText) !== normalizeContextText(initialState.pageText);
       if (screenNumber !== null && samePageSelectionState && contextChanged && selectedKeys.size >= minSelections) {
         await captureSupplementalState(
@@ -897,11 +933,11 @@ function contextSimilarity(a, b) {
       if (afterSelection.cta) {
         console.log('Minimum selection requirement satisfied. Using CTA:', afterSelection.cta.text || '(no text)');
         const beforeCTA = pageSignature(afterSelection);
-        await safeCrawlerClick(
+        const ctaClicked = await safeCrawlerClick(
           page.locator(`[data-auto-id="${afterSelection.cta.id}"]`),
           afterSelection.cta.text || 'answer-group CTA'
         );
-        if (await waitForAdvancement(beforeCTA, 10000)) return true;
+        if (ctaClicked && await waitForAdvancement(beforeCTA, 10000)) return true;
       }
 
       if (instruction.maxSelections && selectedKeys.size >= instruction.maxSelections) break;
@@ -910,11 +946,11 @@ function contextSimilarity(a, b) {
     const finalState = await inspectPage();
     if (selectedKeys.size >= minSelections && finalState.cta) {
       const beforeCTA = pageSignature(finalState);
-      await safeCrawlerClick(
+      const ctaClicked = await safeCrawlerClick(
         page.locator(`[data-auto-id="${finalState.cta.id}"]`),
         finalState.cta.text || 'answer-group CTA'
       );
-      if (await waitForAdvancement(beforeCTA, 10000)) return true;
+      if (ctaClicked && await waitForAdvancement(beforeCTA, 10000)) return true;
     }
 
     return pageSignature(finalState) !== initialSignature;
@@ -958,7 +994,7 @@ function contextSimilarity(a, b) {
     const startedAt = Date.now();
     const initialState = await inspectPage();
     const initialSignature = pageSignature(initialState);
-    const initialUrl = page.url();
+    const initialUrl = sanitizeUrl(page.url());
     const passiveTransition = isPassiveTransitionScreen(initialState.pageText);
     const effectiveTimeoutMs = passiveTransition ? Math.max(timeoutMs, 60000) : timeoutMs;
 
@@ -982,7 +1018,7 @@ function contextSimilarity(a, b) {
       }
 
       if (passiveTransition) {
-        const urlChanged = page.url() !== initialUrl;
+        const urlChanged = sanitizeUrl(page.url()) !== initialUrl;
         const stillPassive = isPassiveTransitionScreen(state.pageText);
         if (urlChanged || !stillPassive) {
           console.log('Automatic page transition detected. Continuing crawl.');
@@ -1222,8 +1258,8 @@ function contextSimilarity(a, b) {
         if ((await submit.count()) > 0 && (await submit.isVisible()) && (await submit.isEnabled())) {
           const termsBeforeSubmit = await handleRequiredAgreementCheckboxes(input);
           if (!termsBeforeSubmit.active) return { recognized: true, advanced: false };
-          await safeCrawlerClick(submit, 'form submit control');
-          if (await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
+          const submittedByClick = await safeCrawlerClick(submit, 'form submit control');
+          if (submittedByClick && await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
         }
         const submitted = await input.evaluate(el => {
           const formEl = el.closest('form');
@@ -1237,8 +1273,8 @@ function contextSimilarity(a, b) {
       if (nearbyAction) {
         const termsBeforeNearbyAction = await handleRequiredAgreementCheckboxes(input);
         if (!termsBeforeNearbyAction.active) return { recognized: true, advanced: false };
-        await safeCrawlerClick(nearbyAction.locator, nearbyAction.text || 'bottom primary CTA');
-        if (await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
+        const clicked = await safeCrawlerClick(nearbyAction.locator, nearbyAction.text || 'bottom primary CTA');
+        if (clicked && await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
       }
       const termsBeforeEnter = await handleRequiredAgreementCheckboxes(input);
       if (!termsBeforeEnter.active) return { recognized: true, advanced: false };
@@ -1296,11 +1332,12 @@ function contextSimilarity(a, b) {
 
     const questionUrl = page.url();
     const before = pageSignature(state);
-    await safeCrawlerClick(page.locator(`[data-auto-id="${option.id}"]`), option.text || 'branch answer');
+    const clicked = await safeCrawlerClick(page.locator(`[data-auto-id="${option.id}"]`), option.text || 'branch answer');
+    if (!clicked) return { advanced: false, landingState: null };
     await page.waitForTimeout(700);
     let after = await inspectPage();
 
-    if (page.url() === questionUrl && after.group.length > 0) {
+    if (sanitizeUrl(page.url()) === sanitizeUrl(questionUrl) && after.group.length > 0) {
       const beforeText = normalizeContextText(questionState?.pageText || state.pageText, [optionText]);
       const afterText = normalizeContextText(after.pageText, [optionText]);
       if (afterText && beforeText !== afterText) {
@@ -1314,8 +1351,8 @@ function contextSimilarity(a, b) {
       }
       if (after.cta) {
         const beforeCTA = pageSignature(after);
-        await safeCrawlerClick(page.locator(`[data-auto-id="${after.cta.id}"]`), after.cta.text || 'branch CTA');
-        if (await waitForAdvancement(beforeCTA, 12000)) {
+        const ctaClicked = await safeCrawlerClick(page.locator(`[data-auto-id="${after.cta.id}"]`), after.cta.text || 'branch CTA');
+        if (ctaClicked && await waitForAdvancement(beforeCTA, 12000)) {
           await waitForScreenshotReady();
           return { advanced: true, landingState: await inspectPage() };
         }
@@ -1330,8 +1367,8 @@ function contextSimilarity(a, b) {
 
     if (after.cta) {
       const beforeCTA = pageSignature(after);
-      await safeCrawlerClick(page.locator(`[data-auto-id="${after.cta.id}"]`), after.cta.text || 'branch CTA');
-      if (await waitForAdvancement(beforeCTA, 12000)) {
+      const ctaClicked = await safeCrawlerClick(page.locator(`[data-auto-id="${after.cta.id}"]`), after.cta.text || 'branch CTA');
+      if (ctaClicked && await waitForAdvancement(beforeCTA, 12000)) {
         await waitForScreenshotReady();
         return { advanced: true, landingState: await inspectPage() };
       }
@@ -1396,9 +1433,9 @@ function contextSimilarity(a, b) {
 
       await waitForScreenshotReady({ minimumWaitMs: 2400, maxWaitMs: 6000 });
       landingState = await inspectPage();
-      const transitionFingerprint = normalizeContextText(landingState.pageText, optionTexts);
-      if (supplementalFingerprintSeen(screenNumber, transitionFingerprint, 0.97)) {
-        console.log(`Transition for "${optionTexts[i]}" has the same meaningful text as a transition already captured. Skipping duplicate screenshot.`);
+      const transitionFingerprint = normalizeContextText(landingState.pageText);
+      if (supplementalFingerprintSeenExact(screenNumber, transitionFingerprint)) {
+        console.log(`Transition for "${optionTexts[i]}" has exactly the same meaningful text as a transition already captured. Skipping duplicate screenshot.`);
         continue;
       }
       const branchName = nextSupplementalFilename(screenNumber);
@@ -1427,22 +1464,23 @@ function contextSimilarity(a, b) {
     const skippedOptionalInput = await handleSkippableInputRequirement(state);
     if (skippedOptionalInput) return true;
 
-    const strongNavigationClicked = await clickStrongNavigation(state);
-    if (strongNavigationClicked) return true;
+    const navigationResult = await clickStrongNavigation(state);
+    if (navigationResult.handled) return navigationResult.advanced;
 
+    state = await inspectPage();
     if (state.group.length > 0) return await handleAnswerGroup(state, screenNumber);
     const formResult = await handleGenericFormInput(state);
     if (formResult.recognized) return formResult.advanced;
     if (state.cta) {
       console.log('Primary CTA detected:', state.cta.text || '(no text)');
       const beforeSignature = pageSignature(state);
-      await safeCrawlerClick(page.locator(`[data-auto-id="${state.cta.id}"]`), state.cta.text || 'primary CTA');
-      await page.waitForTimeout(900);
-      return pageSignature(await inspectPage()) !== beforeSignature;
+      const clicked = await safeCrawlerClick(page.locator(`[data-auto-id="${state.cta.id}"]`), state.cta.text || 'primary CTA');
+      if (!clicked) return false;
+      return await waitForAdvancement(beforeSignature, 12000);
     }
 
-    const fallbackNavigationClicked = await clickStrongNavigation(await inspectPage());
-    if (fallbackNavigationClicked) return true;
+    const fallbackNavigationResult = await clickStrongNavigation(await inspectPage());
+    if (fallbackNavigationResult.handled) return fallbackNavigationResult.advanced;
 
     const delayedResult = await waitForActionableState();
     if (!delayedResult) return false;
@@ -1461,7 +1499,7 @@ function contextSimilarity(a, b) {
     await page.screenshot({ path: filename, fullPage: true });
     console.log(`\nCaptured ${filename}`);
     console.log({
-      url: page.url(),
+      url: sanitizeUrl(page.url()),
       CTA: state.cta?.text || null,
       answerOptions: state.group.map(x => x.text)
     });
@@ -1477,7 +1515,7 @@ function contextSimilarity(a, b) {
 
     const beforeSignature = pageSignature(state);
     let acted = false;
-    if (state.group.length >= 2 && !isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state) && !isStrongNavigationText(state.cta?.text || '')) {
+    if (state.group.length >= 2 && !isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state)) {
       acted = await exploreAnswerBranches(state, screenNumber);
     }
     if (!acted) {
