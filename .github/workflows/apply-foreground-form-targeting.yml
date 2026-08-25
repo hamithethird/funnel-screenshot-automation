@@ -18,6 +18,7 @@ jobs:
           fetch-depth: 0
       - name: Patch crawler
         run: |
+          sed -i 's/pattern.subn(replacement, s, count=1)/pattern.subn(lambda m: replacement, s, count=1)/' scripts/apply_form_targeting_patch.py
           python scripts/apply_form_targeting_patch.py
           node --check funnel-crawler-multiscreen.js
       - name: Commit crawler change
