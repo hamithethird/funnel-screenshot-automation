@@ -1662,6 +1662,27 @@ function sanitizeUrl(rawUrl) {
     return false;
   }
 
+  async function advancePastCapturedTransition(state) {
+    if (!state) return false;
+
+    const strong = await clickStrongNavigation(state, 'captured conditional transition CTA');
+    if (strong.handled) return strong.advanced;
+
+    const refreshed = await inspectPage();
+    if (refreshed.cta) {
+      const before = pageSignature(refreshed);
+      const clicked = await safeCrawlerClick(
+        page.locator(`[data-auto-id="${refreshed.cta.id}"]`),
+        refreshed.cta.text || 'captured conditional transition CTA'
+      );
+      if (clicked && await waitForAdvancement(before, 12000)) return true;
+    }
+
+    const delayed = await waitForActionableState(12000);
+    if (delayed?.changed) return true;
+    return false;
+  }
+
   async function exploreAnswerBranches(state, screenNumber) {
     const instruction = getSelectionInstruction(state.pageText);
     if (isNativeLanguageQuestion(state.pageText)) return false;
