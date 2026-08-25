@@ -31,3 +31,4 @@ jobs:
           git add funnel-crawler-multiscreen.js
           git commit -m "Use prompt-aware checkpoints for branch exploration"
           git push origin HEAD:main
+# retry
