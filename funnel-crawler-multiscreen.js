@@ -103,12 +103,16 @@ function isPassiveTransitionScreen(text) {
 function isSpeechInputScreen(text) {
   const normalized = (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
   if (!normalized) return false;
-  const speechSignals = [
-    /\b(speak|speaking|spoken|say (?:it|this|something)|say aloud|read aloud)\b/,
-    /\b(microphone|mic|voice|record|recording|pronunciation)\b/,
-    /\b(quick call|ai tutor|voice assessment|speaking assessment|speech assessment)\b/
+
+  // Only classify a page as requiring spoken/audio input when the page actually
+  // asks the user to perform a speech/recording action. Mere questionnaire copy
+  // such as "I needed more speaking practice" must NOT disable branch exploration.
+  const hardSpeechSignals = [
+    /\b(microphone|enable (?:your )?mic|allow microphone|record(?:ing)? (?:your )?(?:voice|answer)|start recording|stop recording)\b/,
+    /\b(voice assessment|speech assessment|speaking assessment|pronunciation test|quick call|ai tutor call)\b/,
+    /\b(say (?:this|it|something|the sentence)|say .* aloud|read .* aloud|speak (?:now|into|for|the following)|please speak|start speaking)\b/
   ];
-  return speechSignals.some(pattern => pattern.test(normalized));
+  return hardSpeechSignals.some(pattern => pattern.test(normalized));
 }
 
 const skipEscapePattern = /^(skip|skip for now|not now|maybe later|later|do this later|do it later|continue without(?: this)?|continue without speaking|no thanks|no, thanks|i'll do this later|i will do this later)$/i;
@@ -1090,7 +1094,18 @@ function sanitizeUrl(rawUrl) {
       const afterSelection = await inspectPage();
       const samePageSelectionState = sanitizeUrl(page.url()) === initialUrl && afterSelection.group.length > 0;
       const contextChanged = normalizeContextText(afterSelection.pageText) !== normalizeContextText(initialState.pageText);
-      if (screenNumber !== null && samePageSelectionState && contextChanged && selectedKeys.size >= minSelections) {
+      const originalPrompt = questionPromptFingerprint(initialState);
+      const currentPrompt = questionPromptFingerprint(afterSelection);
+      const promptStillMatches = !!originalPrompt && !!currentPrompt && contextSimilarity(originalPrompt, currentPrompt) >= 0.86;
+      const originalOptions = (initialState.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+      const currentOptions = (afterSelection.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+      const overlap = originalOptions.filter(text => currentOptions.includes(text)).length;
+      const sameAnswerSet = overlap >= Math.max(1, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.6));
+
+      // A lettered screenshot here is reserved for a genuine same-question
+      // post-selection message/popup. A normal next question on the same URL must
+      // remain a normal numbered page.
+      if (screenNumber !== null && samePageSelectionState && contextChanged && promptStillMatches && sameAnswerSet && selectedKeys.size >= minSelections) {
         await captureSupplementalState(
           screenNumber,
           afterSelection,
@@ -1892,6 +1907,8 @@ function sanitizeUrl(rawUrl) {
     let acted = false;
     if (state.group.length >= 2 && !isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state)) {
       acted = await exploreAnswerBranches(state, screenNumber);
+    } else if (state.group.length >= 2 && isSpeechInputScreen(state.pageText)) {
+      console.log('Branch exploration skipped because this page genuinely requests spoken/audio input.');
     }
     if (!acted) {
       const refreshedState = await inspectPage();
