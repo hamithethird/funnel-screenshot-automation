@@ -1206,41 +1206,100 @@ function sanitizeUrl(rawUrl) {
   async function findBottomPrimaryFormAction(input) {
     const inputBox = await input.boundingBox();
     if (!inputBox) return null;
-    const metrics = await page.evaluate(() => ({
-      scrollY: window.scrollY,
-      documentHeight: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
-      viewportWidth: window.innerWidth
-    }));
-    const candidates = page.locator('button, [role="button"], input[type="submit"], input[type="button"]');
+
+    const formInputId = await input.evaluate(el => {
+      let id = el.getAttribute('data-crawler-form-input-id');
+      if (!id) {
+        id = `crawler-form-input-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+        el.setAttribute('data-crawler-form-input-id', id);
+      }
+      return id;
+    });
+
+    const candidates = page.locator('button, [role="button"], input[type="submit"], input[type="button"], a, [onclick]');
     const count = await candidates.count();
     let best = null;
+
     for (let i = 0; i < count; i++) {
       const candidate = candidates.nth(i);
       if (!(await candidate.isVisible().catch(() => false))) continue;
       const box = await candidate.boundingBox();
-      if (!box || box.width < 120 || box.height < 34) continue;
-      const info = await candidate.evaluate(el => {
+      if (!box || box.width < 90 || box.height < 30) continue;
+
+      const info = await candidate.evaluate((el, inputId) => {
+        const inputEl = document.querySelector(`[data-crawler-form-input-id="${CSS.escape(inputId)}"]`);
+        if (!inputEl) return null;
         const style = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        const inputRect = inputEl.getBoundingClientRect();
+        const centerX = Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2));
+        const centerY = Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height / 2));
+        const topElement = document.elementFromPoint(centerX, centerY);
+        const reachable = !!topElement && (topElement === el || el.contains(topElement) || topElement.contains(el));
+
+        const inputForm = inputEl.closest('form');
+        const candidateForm = el.closest('form');
+        const sameForm = !!inputForm && inputForm === candidateForm;
+
+        const panelSelector = '[role="dialog"], [aria-modal="true"], [class*="modal" i], [class*="dialog" i], [class*="popup" i], [class*="overlay" i], [class*="sheet" i], [class*="drawer" i], [class*="gate" i], [class*="unlock" i]';
+        const inputPanel = inputEl.closest(panelSelector);
+        const candidatePanel = el.closest(panelSelector);
+        const sameExplicitPanel = !!inputPanel && inputPanel === candidatePanel;
+
+        const commonAncestor = (() => {
+          let node = inputEl.parentElement;
+          let depth = 0;
+          while (node && node !== document.body && depth < 8) {
+            if (node.contains(el)) {
+              const r = node.getBoundingClientRect();
+              if (r.width >= Math.min(window.innerWidth * 0.55, 220) && r.height >= 120) return node;
+            }
+            node = node.parentElement;
+            depth++;
+          }
+          return null;
+        })();
+
+        const sameContainer = !!commonAncestor;
+        const verticalGap = rect.top - inputRect.bottom;
+        const horizontalCenterDistance = Math.abs((rect.left + rect.width / 2) - (inputRect.left + inputRect.width / 2));
+        const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true' || style.pointerEvents === 'none';
         return {
           text: (el.innerText || el.getAttribute('aria-label') || el.getAttribute('value') || '').trim().replace(/\s+/g, ' ').slice(0, 100),
-          disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true' || style.pointerEvents === 'none',
+          disabled,
           opacity: Number(style.opacity || 1),
-          type: (el.getAttribute('type') || '').toLowerCase()
+          type: (el.getAttribute('type') || '').toLowerCase(),
+          reachable,
+          sameForm,
+          sameExplicitPanel,
+          sameContainer,
+          verticalGap,
+          horizontalCenterDistance,
+          widthRatio: rect.width / window.innerWidth,
+          bottomRatio: rect.bottom / Math.max(document.documentElement.scrollHeight, document.body.scrollHeight, window.innerHeight)
         };
-      });
-      if (info.disabled || info.opacity < 0.35) continue;
-      const absoluteTop = box.y + metrics.scrollY;
-      const inputBottom = inputBox.y + metrics.scrollY + inputBox.height;
-      if (absoluteTop < inputBottom - 20) continue;
-      const absoluteBottom = absoluteTop + box.height;
-      const bottomRatio = metrics.documentHeight ? absoluteBottom / metrics.documentHeight : 0;
-      const widthRatio = metrics.viewportWidth ? box.width / metrics.viewportWidth : 0;
-      let score = Math.min(bottomRatio, 1) * 120 + Math.min(widthRatio, 1) * 45;
-      if (info.type === 'submit') score += 25;
-      if (info.text.length > 0 && info.text.length <= 40) score += 5;
+      }, formInputId).catch(() => null);
+
+      if (!info || info.disabled || info.opacity < 0.35 || !info.reachable) continue;
+      if (info.verticalGap < -24) continue;
+
+      let score = 0;
+      if (info.sameForm) score += 320;
+      if (info.sameExplicitPanel) score += 240;
+      if (info.sameContainer) score += 140;
+      if (info.type === 'submit') score += 80;
+      if (info.verticalGap >= -24 && info.verticalGap <= 180) score += 100;
+      else if (info.verticalGap <= 320) score += 45;
+      if (info.horizontalCenterDistance <= 80) score += 45;
+      if (info.widthRatio >= 0.65) score += 55;
+      else if (info.widthRatio >= 0.40) score += 30;
+      score += Math.min(Math.max(info.bottomRatio, 0), 1) * 30;
+      if (info.text.length > 0 && info.text.length <= 50) score += 10;
+
       if (!best || score > best.score) best = { locator: candidate, text: info.text, score };
     }
-    if (best) console.log('Bottom primary form CTA candidate:', best.text || '(no text)');
+
+    if (best) console.log('Foreground form CTA candidate:', best.text || '(no text)');
     return best;
   }
 
