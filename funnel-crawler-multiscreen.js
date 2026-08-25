@@ -89,7 +89,7 @@ function isPassiveTransitionScreen(text) {
   if (!normalized) return false;
 
   const passiveSignals = [
-    /\b(crafting|creating|generating|building|preparing|personalizing|personalising|analyzing|analysing|processing|loading|calculating|finalizing|finalising)\b/,
+    /\b(crafting|creating|generating|building|preparing|personalizing|personalising|analyzing|analysing|processing|loading|calculating|finalizing|finalising|matching|assessing|evaluating|scoring|tailoring|compiling)\b/,
     /\b(putting together|setting up)\b/,
     /\bplease wait\b/,
     /\balmost (?:done|ready|there)\b/,
@@ -2008,7 +2008,15 @@ function sanitizeUrl(rawUrl) {
     // Some evaluation/loading screens pause their automatic progress to ask a
     // lightweight Yes/No-style question. This is not a branch question: the
     // answer only unlocks/resumes the same passive evaluation sequence.
-    if (!state || state.group.length < 2 || !isPassiveTransitionScreen(state.pageText)) {
+    if (!state || state.group.length < 2) {
+      return { handled: false, advanced: false };
+    }
+
+    const normalizedPageText = (state.pageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const hasProgressPercent = /\b(?:[1-9]?\d|100)%\b/.test(normalizedPageText);
+    const evaluationLanguage = /\b(matching|analyzing|analysing|processing|loading|calculating|assessing|evaluating|scoring|preparing|building|creating|generating|personalizing|personalising|tailoring|compiling)\b/.test(normalizedPageText);
+    const evaluationGateContext = isPassiveTransitionScreen(state.pageText) || (hasProgressPercent && evaluationLanguage);
+    if (!evaluationGateContext) {
       return { handled: false, advanced: false };
     }
 
