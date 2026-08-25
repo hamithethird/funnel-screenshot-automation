@@ -1765,6 +1765,21 @@ function sanitizeUrl(rawUrl) {
       const currentPrompt = questionPromptFingerprint(after);
       const promptStillMatches = !!originalPrompt && !!currentPrompt && contextSimilarity(originalPrompt, currentPrompt) >= 0.86;
       const sameQuestionStillVisible = optionsStillMatch && promptStillMatches;
+
+      // A large number of onboarding funnels are SPAs: clicking an answer replaces
+      // the current question with the next question without changing the URL. If
+      // the prompt/answer set no longer matches the original question, that is real
+      // advancement and must be returned as the branch landing state. Previously we
+      // fell through and reported advance-failed simply because another answer group
+      // was already visible on the same URL.
+      if (!sameQuestionStillVisible && pageSignature(after) !== before) {
+        await waitForScreenshotReady();
+        return {
+          advanced: true,
+          landingState: await inspectPageNavigationSafe('same-URL next-question branch landing')
+        };
+      }
+
       if (sameQuestionStillVisible && afterText && beforeText !== afterText) {
         await captureSupplementalState(
           screenNumber,
