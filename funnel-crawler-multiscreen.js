@@ -100,6 +100,24 @@ function isPassiveTransitionScreen(text) {
   return passiveSignals.some(pattern => pattern.test(normalized));
 }
 
+function isNonBranchProfileQuestion(text) {
+  const normalized = (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!normalized) return false;
+
+  // These are ordinary profile/setup questions whose answers normally just move
+  // the funnel forward. Branch probing is harmful on stateful SPAs because the
+  // exact question may not be restorable after the first answer.
+  const profilePatterns = [
+    /\bphysical build\b/,
+    /\bbody (?:type|shape|build)\b/,
+    /\bhow would you describe your (?:body|build|physique)\b/,
+    /\b(?:your )?(?:height|weight|age|gender|sex)\b/,
+    /\bhow (?:tall|old) are you\b/,
+    /\bwhat is your (?:height|weight|age|gender)\b/
+  ];
+  return profilePatterns.some(pattern => pattern.test(normalized));
+}
+
 function isSpeechInputScreen(text) {
   const normalized = (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
   if (!normalized) return false;
@@ -1870,6 +1888,10 @@ function sanitizeUrl(rawUrl) {
   async function exploreAnswerBranches(state, screenNumber) {
     const instruction = getSelectionInstruction(state.pageText);
     if (isNativeLanguageQuestion(state.pageText)) return false;
+    if (isNonBranchProfileQuestion(state.pageText)) {
+      console.log('Simple profile/setup question detected. Skipping branch exploration and taking a normal answer path.');
+      return false;
+    }
     if (isSpeechInputScreen(state.pageText) || hasSkipEscapeChoice(state)) {
       console.log('Skip/optional-input screen detected. Bypassing branch exploration so the escape action can be used.');
       return false;
