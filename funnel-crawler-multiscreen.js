@@ -259,6 +259,7 @@ function sanitizeUrl(rawUrl) {
   const RUN_PASSWORD = generateRunPassword(16);
   const supplementalCounterByScreen = new Map();
   const supplementalFingerprintsByScreen = new Map();
+  let skipNextNumberedFingerprint = null;
 
   function nextSupplementalFilename(screenNumber) {
     const current = supplementalCounterByScreen.get(screenNumber) || 0;
@@ -1583,7 +1584,11 @@ function sanitizeUrl(rawUrl) {
     if (sanitizeUrl(page.url()) === sanitizeUrl(questionUrl) && after.group.length > 0) {
       const beforeText = normalizeContextText(questionState?.pageText || state.pageText, [optionText]);
       const afterText = normalizeContextText(after.pageText, [optionText]);
-      if (afterText && beforeText !== afterText) {
+      const originalOptions = (questionState?.group || state.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+      const currentOptions = (after.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+      const optionOverlap = originalOptions.filter(text => currentOptions.includes(text)).length;
+      const sameQuestionStillVisible = optionOverlap >= Math.max(1, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.5));
+      if (sameQuestionStillVisible && afterText && beforeText !== afterText) {
         await captureSupplementalState(
           screenNumber,
           after,
@@ -1662,25 +1667,12 @@ function sanitizeUrl(rawUrl) {
     return false;
   }
 
-  async function advancePastCapturedTransition(state) {
-    if (!state) return false;
-
-    const strong = await clickStrongNavigation(state, 'captured conditional transition CTA');
-    if (strong.handled) return strong.advanced;
-
-    const refreshed = await inspectPage();
-    if (refreshed.cta) {
-      const before = pageSignature(refreshed);
-      const clicked = await safeCrawlerClick(
-        page.locator(`[data-auto-id="${refreshed.cta.id}"]`),
-        refreshed.cta.text || 'captured conditional transition CTA'
-      );
-      if (clicked && await waitForAdvancement(before, 12000)) return true;
-    }
-
-    const delayed = await waitForActionableState(12000);
-    if (delayed?.changed) return true;
-    return false;
+  function branchProbeIndexes(optionCount, maxProbe = 4) {
+    if (optionCount <= maxProbe) return Array.from({ length: optionCount }, (_, i) => i);
+    const raw = [0, optionCount - 1, Math.round((optionCount - 1) / 3), Math.round(((optionCount - 1) * 2) / 3)];
+    const unique = [];
+    for (const index of raw) if (!unique.includes(index)) unique.push(index);
+    return unique.slice(0, maxProbe);
   }
 
   async function exploreAnswerBranches(state, screenNumber) {
@@ -1703,49 +1695,55 @@ function sanitizeUrl(rawUrl) {
     const questionUrl = page.url();
     const questionState = state;
     const outcomes = [];
-    console.log(`Testing all ${optionTexts.length} answers before deciding whether this is a conditional branch.`);
+    const probedIndexes = branchProbeIndexes(optionTexts.length, 4);
+    console.log(`Probing up to ${probedIndexes.length} strategically spread answers to determine whether this question has conditional next pages.`);
 
-    for (let i = 0; i < optionTexts.length; i++) {
-      if (i > 0) {
+    const recordOutcomeForIndex = async (index) => {
+      if (outcomes.length > 0) {
         const restored = await restoreQuestionPage(questionUrl, optionTexts);
-        if (!restored) {
-          console.log('Could not safely restore the question while comparing answer outcomes. Aborting branch exploration.');
-          await restoreQuestionPage(questionUrl, optionTexts);
-          return false;
-        }
+        if (!restored) return { ok: false, reason: 'restore-failed' };
       }
-
-      const result = await chooseBranchOptionAndAdvance(optionTexts[i], screenNumber, questionState);
-      if (!result.advanced || !result.landingState) {
-        console.log('Answer did not produce a stable next page:', optionTexts[i]);
-        await restoreQuestionPage(questionUrl, optionTexts);
-        return false;
-      }
-
-      let landingState = result.landingState;
-      const transitionLike = await isLikelyBranchTransition(landingState, questionState);
-      if (!transitionLike) {
-        console.log(`Answer "${optionTexts[i]}" leads directly to a normal interactive page. This question is not being treated as a conditional-transition branch.`);
-        await restoreQuestionPage(questionUrl, optionTexts);
-        return false;
-      }
-
-      await waitForScreenshotReady({ minimumWaitMs: 2400, maxWaitMs: 6000 });
-      landingState = await inspectPage();
+      const result = await chooseBranchOptionAndAdvance(optionTexts[index], screenNumber, questionState);
+      if (!result.advanced || !result.landingState) return { ok: false, reason: 'advance-failed' };
+      await waitForScreenshotReady({ minimumWaitMs: 2200, maxWaitMs: 5800 });
+      const landingState = await inspectPage();
       const fingerprint = normalizeContextText(landingState.pageText);
-      if (!fingerprint) {
-        console.log('Could not build a meaningful transition fingerprint for:', optionTexts[i]);
+      if (!fingerprint) return { ok: false, reason: 'no-fingerprint' };
+      const screenshotBuffer = await page.screenshot({ fullPage: true });
+      outcomes.push({ index, optionText: optionTexts[index], fingerprint, screenshotBuffer, landingState });
+      console.log(`Recorded immediate next-page outcome for "${optionTexts[index]}".`);
+      return { ok: true };
+    };
+
+    for (const index of probedIndexes) {
+      const recorded = await recordOutcomeForIndex(index);
+      if (!recorded.ok) {
+        console.log('Could not safely compare branch outcome:', recorded.reason);
         await restoreQuestionPage(questionUrl, optionTexts);
         return false;
       }
+    }
 
-      const screenshotBuffer = await page.screenshot({ fullPage: true });
-      outcomes.push({
-        optionText: optionTexts[i],
-        fingerprint,
-        screenshotBuffer
-      });
-      console.log(`Recorded next-page outcome for "${optionTexts[i]}".`);
+    const probeFingerprints = new Set(outcomes.map(x => x.fingerprint));
+    if (probeFingerprints.size <= 1) {
+      console.log(`Branch probe result: all ${outcomes.length} tested answers lead to the same immediate next page. No conditional branch detected.`);
+      const restored = await restoreQuestionPage(questionUrl, optionTexts);
+      if (!restored) return false;
+      const finalResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);
+      return finalResult.advanced;
+    }
+
+    console.log(`Conditional branching confirmed: ${probeFingerprints.size} different immediate next pages found in the probe.`);
+    console.log('Branching is confirmed, so the crawler will now test the remaining answers to collect all unique transition pages.');
+
+    const alreadyTested = new Set(outcomes.map(x => x.index));
+    for (let index = 0; index < optionTexts.length; index++) {
+      if (alreadyTested.has(index)) continue;
+      const recorded = await recordOutcomeForIndex(index);
+      if (!recorded.ok) {
+        console.log(`Could not safely test remaining branch answer "${optionTexts[index]}". Continuing with collected outcomes.`);
+        break;
+      }
     }
 
     const uniqueOutcomes = [];
@@ -1759,45 +1757,34 @@ function sanitizeUrl(rawUrl) {
       }
     }
 
-    console.log(`Branch comparison result: ${uniqueOutcomes.length} unique next-page outcome(s) across ${outcomes.length} answers.`);
-
     if (uniqueOutcomes.length <= 1) {
-      console.log('All tested answers lead to the same transition page. No conditional transition branch exists here.');
+      console.log('After full comparison, all answers collapsed to one unique next page. No conditional screenshots will be created.');
       const restored = await restoreQuestionPage(questionUrl, optionTexts);
       if (!restored) return false;
       const finalResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);
       return finalResult.advanced;
     }
 
-    console.log('Different answers produce different transition pages. Saving each unique conditional transition as a lettered screenshot.');
+    console.log(`Saving ${uniqueOutcomes.length} unique conditional next pages as lettered screenshots.`);
     for (let i = 0; i < uniqueOutcomes.length; i++) {
       const filename = path.join(OUTPUT_DIR, `${String(screenNumber).padStart(2, '0')}${branchLetter(i)}.png`);
       fs.writeFileSync(filename, uniqueOutcomes[i].screenshotBuffer);
-      console.log(`Captured conditional transition ${path.basename(filename)} for answer(s): ${uniqueOutcomes[i].answers.join(' | ')}`);
+      console.log(`Captured ${path.basename(filename)} for answer(s): ${uniqueOutcomes[i].answers.join(' | ')}`);
     }
 
     const restored = await restoreQuestionPage(questionUrl, optionTexts);
     if (!restored) {
-      console.log('Conditional transitions were captured, but the main question could not be restored safely.');
+      console.log('Conditional pages were captured, but the main question could not be restored safely.');
       return false;
     }
 
-    console.log('Conditional branch capture complete. Continuing the main path through the first answer.');
     const finalResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);
     if (!finalResult.advanced || !finalResult.landingState) return false;
-
     const mainFingerprint = normalizeContextText(finalResult.landingState.pageText);
-    const alreadyCaptured = uniqueOutcomes.some(item => item.fingerprint === mainFingerprint);
-    if (alreadyCaptured) {
-      const movedPastTransition = await advancePastCapturedTransition(finalResult.landingState);
-      if (movedPastTransition) {
-        console.log('Advanced past the already-captured conditional transition so the next numbered screenshot will not duplicate a lettered image.');
-        return true;
-      }
-      console.log('Could not advance past the already-captured transition. Stopping branch handling to avoid intentionally duplicating it as the next numbered screenshot.');
-      return false;
+    if (uniqueOutcomes.some(item => item.fingerprint === mainFingerprint)) {
+      skipNextNumberedFingerprint = mainFingerprint;
+      console.log('Main path is currently on a transition already captured as a lettered screenshot; the next numbered capture will skip over it.');
     }
-
     return true;
   }
 
@@ -1846,7 +1833,25 @@ function sanitizeUrl(rawUrl) {
     await waitForVisualSettle();
     await dismissBlockingConsentOverlay();
     await silenceMedia();
-    const state = await inspectPage();
+    let state = await inspectPage();
+
+    if (skipNextNumberedFingerprint) {
+      const currentFingerprint = normalizeContextText(state.pageText);
+      if (currentFingerprint === skipNextNumberedFingerprint) {
+        console.log('Current page was already captured as a conditional lettered screenshot. Advancing before assigning the next numbered screenshot.');
+        const advancedPast = await advancePastCapturedTransition(state);
+        skipNextNumberedFingerprint = null;
+        if (!advancedPast) {
+          console.log('Could not safely advance past the already-captured transition. Stopping to avoid a duplicate numbered screenshot.');
+          break;
+        }
+        await waitForVisualSettle();
+        state = await inspectPage();
+      } else {
+        skipNextNumberedFingerprint = null;
+      }
+    }
+
     const paywallState = await inspectPaywallState();
     const filename = path.join(OUTPUT_DIR, `${String(screenNumber).padStart(2, '0')}.png`);
     await page.screenshot({ path: filename, fullPage: true });
