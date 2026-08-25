@@ -109,6 +109,14 @@ function isSpeechInputScreen(text) {
   return speechSignals.some(pattern => pattern.test(normalized));
 }
 
+const skipEscapePattern = /^(skip|skip for now|not now|maybe later|later|do this later|do it later|continue without(?: this)?|continue without speaking|no thanks|no, thanks|i'll do this later|i will do this later)$/i;
+
+function hasSkipEscapeChoice(state) {
+  if (!state) return false;
+  const texts = [state.cta?.text || '', ...(state.group || []).map(item => item.text || '')];
+  return texts.some(text => skipEscapePattern.test(text.trim()));
+}
+
 function branchLetter(index) {
   let n = index;
   let out = '';
@@ -124,8 +132,7 @@ function normalizeContextText(text, removeTexts = []) {
     .toLowerCase()
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\b\d+(?:[.,]\d+)?%?\b/g, ' ')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/[^\p{L}\p{N}%]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -134,7 +141,7 @@ function normalizeContextText(text, removeTexts = []) {
       .toLowerCase()
       .normalize('NFKD')
       .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .replace(/[^\p{L}\p{N}%]+/gu, ' ')
       .replace(/\s+/g, ' ')
       .trim();
     if (remove.length >= 2) normalized = normalized.split(remove).join(' ');
@@ -149,6 +156,11 @@ function normalizeContextText(text, removeTexts = []) {
 function contextSimilarity(a, b) {
   if (!a || !b) return 0;
   if (a === b) return 1;
+
+  const numericA = a.match(/\b\d+(?:[.,]\d+)?%?\b/g) || [];
+  const numericB = b.match(/\b\d+(?:[.,]\d+)?%?\b/g) || [];
+  if (numericA.join('|') !== numericB.join('|')) return 0;
+
   const tokensA = new Set(a.split(' ').filter(token => token.length > 1));
   const tokensB = new Set(b.split(' ').filter(token => token.length > 1));
   if (!tokensA.size || !tokensB.size) return 0;
@@ -212,7 +224,7 @@ function contextSimilarity(a, b) {
     return `${String(screenNumber).padStart(2, '0')}${branchLetter(current)}.png`;
   }
 
-  function supplementalFingerprintSeen(screenNumber, fingerprint, threshold = 0.82) {
+  function supplementalFingerprintSeen(screenNumber, fingerprint, threshold = 0.95) {
     const seen = supplementalFingerprintsByScreen.get(screenNumber) || [];
     const match = seen.find(existing => contextSimilarity(existing, fingerprint) >= threshold);
     if (match) return true;
@@ -599,7 +611,7 @@ function contextSimilarity(a, b) {
     return `${page.url()}\n${state.pageText}`;
   }
 
-  async function captureSupplementalState(screenNumber, state, reason, removeTexts = [], threshold = 0.82) {
+  async function captureSupplementalState(screenNumber, state, reason, removeTexts = [], threshold = 0.95) {
     const fingerprint = normalizeContextText(state?.pageText || '', removeTexts);
     if (!fingerprint || fingerprint.length < 10) return null;
     if (supplementalFingerprintSeen(screenNumber, fingerprint, threshold)) {
@@ -655,7 +667,7 @@ function contextSimilarity(a, b) {
   }
 
   async function handleSkippableInputRequirement(state) {
-    if (!isSpeechInputScreen(state.pageText)) return false;
+    if (!isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state)) return false;
     const result = await page.evaluate(() => {
       const escapePattern = /^(skip|skip for now|not now|maybe later|later|do this later|do it later|continue without(?: this)?|continue without speaking|no thanks|no, thanks|i'll do this later|i will do this later)$/i;
       const elements = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"]'));
@@ -685,11 +697,11 @@ function contextSimilarity(a, b) {
     });
 
     if (!result) {
-      console.log('Speech/input screen detected, but no safe skip option was found.');
+      console.log('Optional input/assessment screen detected, but no safe skip option was found.');
       return false;
     }
 
-    console.log('Optional speech/input requirement detected. Using escape option:', result.text);
+    console.log('Optional input/assessment requirement detected. Using escape option:', result.text);
     const before = pageSignature(state);
     await safeCrawlerClick(page.locator(`[data-skip-input-id="${result.id}"]`), result.text || 'skip input');
     return await waitForAdvancement(before, 12000);
@@ -812,7 +824,7 @@ function contextSimilarity(a, b) {
           afterSelection,
           'post-selection response/popup',
           [option.text],
-          0.9
+          0.95
         );
       }
 
@@ -903,7 +915,7 @@ function contextSimilarity(a, b) {
       await silenceMedia();
       const state = await inspectPage();
       const signature = pageSignature(state);
-      const actionable = state.group.length > 0 || state.cta !== null || isNativeLanguageQuestion(state.pageText) || isSpeechInputScreen(state.pageText);
+      const actionable = state.group.length > 0 || state.cta !== null || isNativeLanguageQuestion(state.pageText) || isSpeechInputScreen(state.pageText) || hasSkipEscapeChoice(state);
 
       if (actionable) {
         if (passiveTransition) console.log('Passive transition completed: actionable screen appeared.');
@@ -1238,7 +1250,7 @@ function contextSimilarity(a, b) {
           after,
           `post-selection response for "${optionText}"`,
           [optionText],
-          0.9
+          0.95
         );
       }
       if (after.cta) {
@@ -1273,6 +1285,10 @@ function contextSimilarity(a, b) {
   async function exploreAnswerBranches(state, screenNumber) {
     const instruction = getSelectionInstruction(state.pageText);
     if (isNativeLanguageQuestion(state.pageText)) return false;
+    if (isSpeechInputScreen(state.pageText) || hasSkipEscapeChoice(state)) {
+      console.log('Skip/optional-input screen detected. Bypassing branch exploration so the escape action can be used.');
+      return false;
+    }
     if (state.group.length < 2 || state.group.length > 10) return false;
     if (instruction.minSelections !== 1 || instruction.maxSelections !== 1) return false;
 
@@ -1322,8 +1338,8 @@ function contextSimilarity(a, b) {
       await waitForScreenshotReady({ minimumWaitMs: 2400, maxWaitMs: 6000 });
       landingState = await inspectPage();
       const transitionFingerprint = normalizeContextText(landingState.pageText, optionTexts);
-      if (supplementalFingerprintSeen(screenNumber, transitionFingerprint, 0.8)) {
-        console.log(`Transition for "${optionTexts[i]}" is contextually the same as a transition already captured. Skipping duplicate screenshot.`);
+      if (supplementalFingerprintSeen(screenNumber, transitionFingerprint, 0.97)) {
+        console.log(`Transition for "${optionTexts[i]}" has the same meaningful text as a transition already captured. Skipping duplicate screenshot.`);
         continue;
       }
       const branchName = nextSupplementalFilename(screenNumber);
@@ -1394,7 +1410,7 @@ function contextSimilarity(a, b) {
 
     const beforeSignature = pageSignature(state);
     let acted = false;
-    if (state.group.length >= 2) {
+    if (state.group.length >= 2 && !isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state)) {
       acted = await exploreAnswerBranches(state, screenNumber);
     }
     if (!acted) {
