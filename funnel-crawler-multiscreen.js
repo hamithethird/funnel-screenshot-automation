@@ -179,6 +179,12 @@ function contextSimilarity(a, b) {
   return Math.max(jaccard, containment * 0.92);
 }
 
+function questionPromptFingerprint(state) {
+  if (!state) return '';
+  const optionTexts = (state.group || []).map(x => x.text || '').filter(Boolean);
+  return normalizeContextText(state.pageText || '', optionTexts);
+}
+
 function sanitizeUrl(rawUrl) {
   try {
     const parsed = new URL(rawUrl);
@@ -1539,20 +1545,26 @@ function sanitizeUrl(rawUrl) {
     return true;
   }
 
-  async function restoreQuestionPage(questionUrl, expectedOptions) {
+  async function restoreQuestionPage(questionUrl, expectedOptions, expectedQuestionFingerprint = '') {
     const expected = expectedOptions.map(x => (x || '').trim().toLowerCase()).filter(Boolean);
     const matchesQuestion = state => {
       if (!state || state.group.length < 2) return false;
       const current = state.group.map(x => (x.text || '').trim().toLowerCase());
       const overlap = expected.filter(text => current.includes(text)).length;
-      return overlap >= Math.min(2, expected.length);
+      const optionsMatch = overlap >= Math.min(2, expected.length);
+      if (!optionsMatch) return false;
+
+      if (!expectedQuestionFingerprint) return true;
+      const currentPrompt = questionPromptFingerprint(state);
+      if (!currentPrompt) return false;
+      return contextSimilarity(expectedQuestionFingerprint, currentPrompt) >= 0.86;
     };
 
     try {
       await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 });
       await page.waitForTimeout(700);
       await silenceMedia();
-      let state = await inspectPage();
+      const state = await inspectPage();
       if (matchesQuestion(state)) return state;
     } catch {}
 
@@ -1587,7 +1599,11 @@ function sanitizeUrl(rawUrl) {
       const originalOptions = (questionState?.group || state.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
       const currentOptions = (after.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
       const optionOverlap = originalOptions.filter(text => currentOptions.includes(text)).length;
-      const sameQuestionStillVisible = optionOverlap >= Math.max(1, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.5));
+      const optionsStillMatch = optionOverlap >= Math.max(1, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.5));
+      const originalPrompt = questionPromptFingerprint(questionState || state);
+      const currentPrompt = questionPromptFingerprint(after);
+      const promptStillMatches = !!originalPrompt && !!currentPrompt && contextSimilarity(originalPrompt, currentPrompt) >= 0.86;
+      const sameQuestionStillVisible = optionsStillMatch && promptStillMatches;
       if (sameQuestionStillVisible && afterText && beforeText !== afterText) {
         await captureSupplementalState(
           screenNumber,
@@ -1694,13 +1710,14 @@ function sanitizeUrl(rawUrl) {
 
     const questionUrl = page.url();
     const questionState = state;
+    const questionFingerprint = questionPromptFingerprint(questionState);
     const outcomes = [];
     const probedIndexes = branchProbeIndexes(optionTexts.length, 4);
     console.log(`Probing up to ${probedIndexes.length} strategically spread answers to determine whether this question has conditional next pages.`);
 
     const recordOutcomeForIndex = async (index) => {
       if (outcomes.length > 0) {
-        const restored = await restoreQuestionPage(questionUrl, optionTexts);
+        const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
         if (!restored) return { ok: false, reason: 'restore-failed' };
       }
       const result = await chooseBranchOptionAndAdvance(optionTexts[index], screenNumber, questionState);
@@ -1719,7 +1736,7 @@ function sanitizeUrl(rawUrl) {
       const recorded = await recordOutcomeForIndex(index);
       if (!recorded.ok) {
         console.log('Could not safely compare branch outcome:', recorded.reason);
-        await restoreQuestionPage(questionUrl, optionTexts);
+        await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
         return false;
       }
     }
@@ -1727,7 +1744,7 @@ function sanitizeUrl(rawUrl) {
     const probeFingerprints = new Set(outcomes.map(x => x.fingerprint));
     if (probeFingerprints.size <= 1) {
       console.log(`Branch probe result: all ${outcomes.length} tested answers lead to the same immediate next page. No conditional branch detected.`);
-      const restored = await restoreQuestionPage(questionUrl, optionTexts);
+      const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
       if (!restored) return false;
       const finalResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);
       return finalResult.advanced;
@@ -1759,7 +1776,7 @@ function sanitizeUrl(rawUrl) {
 
     if (uniqueOutcomes.length <= 1) {
       console.log('After full comparison, all answers collapsed to one unique next page. No conditional screenshots will be created.');
-      const restored = await restoreQuestionPage(questionUrl, optionTexts);
+      const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
       if (!restored) return false;
       const finalResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);
       return finalResult.advanced;
@@ -1772,7 +1789,7 @@ function sanitizeUrl(rawUrl) {
       console.log(`Captured ${path.basename(filename)} for answer(s): ${uniqueOutcomes[i].answers.join(' | ')}`);
     }
 
-    const restored = await restoreQuestionPage(questionUrl, optionTexts);
+    const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
     if (!restored) {
       console.log('Conditional pages were captured, but the main question could not be restored safely.');
       return false;
