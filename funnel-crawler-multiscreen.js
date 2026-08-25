@@ -1560,6 +1560,24 @@ function sanitizeUrl(rawUrl) {
     return true;
   }
 
+  async function inspectPageNavigationSafe(label = 'page inspection', attempts = 4) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await inspectPage();
+      } catch (error) {
+        lastError = error;
+        const message = String(error?.message || error || '');
+        const navigationRace = /execution context was destroyed|cannot find context|most likely because of a navigation|frame was detached|target page, context or browser has been closed/i.test(message);
+        if (!navigationRace || attempt === attempts) throw error;
+        console.log(`Navigation was still settling during ${label}. Waiting before retry ${attempt + 1}/${attempts}.`);
+        await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(350 * attempt);
+      }
+    }
+    throw lastError;
+  }
+
   async function restoreQuestionPage(questionUrl, expectedOptions, expectedQuestionFingerprint = '') {
     const expected = expectedOptions.map(x => (x || '').trim().toLowerCase()).filter(Boolean);
     const matchesQuestion = state => {
@@ -1578,13 +1596,13 @@ function sanitizeUrl(rawUrl) {
     const inspectAndMatch = async (waitMs = 700) => {
       await page.waitForTimeout(waitMs);
       await silenceMedia();
-      const state = await inspectPage();
+      const state = await inspectPageNavigationSafe('branch restore verification');
       return matchesQuestion(state) ? state : null;
     };
 
     // If we are already back on the question, do nothing. This is important for
     // branch probing because the first answer must always use the untouched page.
-    const currentState = await inspectPage().catch(() => null);
+    const currentState = await inspectPageNavigationSafe('branch restore pre-check').catch(() => null);
     if (matchesQuestion(currentState)) return currentState;
 
     // Prefer the funnel's own visible Back control. Many onboarding SPAs keep every
@@ -1644,7 +1662,11 @@ function sanitizeUrl(rawUrl) {
           'funnel Back control'
         );
         if (clicked) {
-          const matched = await inspectAndMatch(900);
+          // The funnel Back control may trigger a real document navigation. Wait for
+          // that navigation to settle before any DOM inspection is attempted.
+          await page.waitForLoadState('domcontentloaded', { timeout: 6000 }).catch(() => {});
+          await page.waitForTimeout(450);
+          const matched = await inspectAndMatch(500);
           if (matched) return matched;
         }
       }
@@ -1673,7 +1695,7 @@ function sanitizeUrl(rawUrl) {
   }
 
   async function chooseBranchOptionAndAdvance(optionText, screenNumber, questionState) {
-    let state = await inspectPage();
+    let state = await inspectPageNavigationSafe('branch answer inspection');
     const wanted = (optionText || '').trim().toLowerCase();
     let option = state.group.find(x => (x.text || '').trim().toLowerCase() === wanted);
     if (!option) option = state.group.find(x => (x.text || '').trim().toLowerCase().includes(wanted));
@@ -1684,7 +1706,7 @@ function sanitizeUrl(rawUrl) {
     const clicked = await safeCrawlerClick(page.locator(`[data-auto-id="${option.id}"]`), option.text || 'branch answer');
     if (!clicked) return { advanced: false, landingState: null };
     await page.waitForTimeout(700);
-    let after = await inspectPage();
+    let after = await inspectPageNavigationSafe('branch answer inspection');
 
     // Some funnels update the next screen asynchronously after the answer click.
     // Poll briefly before treating a still-identical screen as an advance failure.
@@ -1692,7 +1714,7 @@ function sanitizeUrl(rawUrl) {
       const waitStarted = Date.now();
       while (Date.now() - waitStarted < 3500 && pageSignature(after) === before) {
         await page.waitForTimeout(350);
-        after = await inspectPage();
+        after = await inspectPageNavigationSafe('branch answer inspection');
       }
     }
 
@@ -1721,7 +1743,7 @@ function sanitizeUrl(rawUrl) {
         const ctaClicked = await safeCrawlerClick(page.locator(`[data-auto-id="${after.cta.id}"]`), after.cta.text || 'branch CTA');
         if (ctaClicked && await waitForAdvancement(beforeCTA, 12000)) {
           await waitForScreenshotReady();
-          return { advanced: true, landingState: await inspectPage() };
+          return { advanced: true, landingState: await inspectPageNavigationSafe('branch answer inspection') };
         }
       }
       return { advanced: false, landingState: after };
@@ -1729,7 +1751,7 @@ function sanitizeUrl(rawUrl) {
 
     if (pageSignature(after) !== before) {
       await waitForScreenshotReady();
-      return { advanced: true, landingState: await inspectPage() };
+      return { advanced: true, landingState: await inspectPageNavigationSafe('branch answer inspection') };
     }
 
     if (after.cta) {
@@ -1737,11 +1759,11 @@ function sanitizeUrl(rawUrl) {
       const ctaClicked = await safeCrawlerClick(page.locator(`[data-auto-id="${after.cta.id}"]`), after.cta.text || 'branch CTA');
       if (ctaClicked && await waitForAdvancement(beforeCTA, 12000)) {
         await waitForScreenshotReady();
-        return { advanced: true, landingState: await inspectPage() };
+        return { advanced: true, landingState: await inspectPageNavigationSafe('branch answer inspection') };
       }
     }
 
-    after = await inspectPage();
+    after = await inspectPageNavigationSafe('branch answer inspection');
     return { advanced: pageSignature(after) !== before, landingState: after };
   }
 
