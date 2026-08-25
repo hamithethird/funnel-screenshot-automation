@@ -98,6 +98,27 @@ function isPassiveTransitionScreen(text) {
   return passiveSignals.some(pattern => pattern.test(normalized));
 }
 
+function isSpeechInputScreen(text) {
+  const normalized = (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!normalized) return false;
+  const speechSignals = [
+    /\b(speak|speaking|spoken|say (?:it|this|something)|say aloud|read aloud)\b/,
+    /\b(microphone|mic|voice|record|recording|pronunciation)\b/,
+    /\b(quick call|ai tutor|voice assessment|speaking assessment|speech assessment)\b/
+  ];
+  return speechSignals.some(pattern => pattern.test(normalized));
+}
+
+function branchLetter(index) {
+  let n = index;
+  let out = '';
+  do {
+    out = String.fromCharCode(97 + (n % 26)) + out;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return out;
+}
+
 (async () => {
   const url = process.argv[2];
   if (!url) {
@@ -141,6 +162,18 @@ function isPassiveTransitionScreen(text) {
   }
 
   const RUN_PASSWORD = generateRunPassword(16);
+
+  async function silenceMedia() {
+    await page.evaluate(() => {
+      for (const media of document.querySelectorAll('audio, video')) {
+        try {
+          media.muted = true;
+          media.volume = 0;
+          media.pause();
+        } catch {}
+      }
+    }).catch(() => {});
+  }
 
   async function dismissBlockingConsentOverlay() {
     const overlaySelectors = [
@@ -188,8 +221,10 @@ function isPassiveTransitionScreen(text) {
 
   async function safeCrawlerClick(locator, description = 'target') {
     await dismissBlockingConsentOverlay();
+    await silenceMedia();
     try {
       await locator.click({ timeout: 7000 });
+      await silenceMedia();
       return true;
     } catch (error) {
       const message = String(error?.message || error);
@@ -199,11 +234,13 @@ function isPassiveTransitionScreen(text) {
       if (!dismissed) throw error;
       console.log('Retrying original click after modal dismissal:', description);
       await locator.click({ timeout: 7000 });
+      await silenceMedia();
       return true;
     }
   }
 
   await dismissBlockingConsentOverlay();
+  await silenceMedia();
 
   async function handleEnglishLanguageChoice() {
     const result = await page.evaluate(() => {
@@ -361,6 +398,7 @@ function isPassiveTransitionScreen(text) {
       const pageText = document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 3000);
       const questionSignals = /\b(select all that apply|choose all that apply|select any|choose any|select one|choose one|pick one|choose\s+\d+|select\s+\d+|pick\s+\d+|or more|at least|which|what(?:'s| is| are| do| would)|how (?:often|do|would|well|much))\b/i;
       const navigationText = /^(continue|next|proceed|submit|done|finish|start|see results?|get started|create account|sign up|go on)$/i;
+      const mediaOnlyText = /^(play|pause|listen|listen again|replay|audio|sound|hear|speaker)$/i;
 
       const controls = all.map((el, index) => {
         const rect = el.getBoundingClientRect();
@@ -382,11 +420,15 @@ function isPassiveTransitionScreen(text) {
           (tag === 'label' || el.hasAttribute('onclick') || el.tabIndex >= 0 || style.cursor === 'pointer');
         const interactive = answerControl || navigationControl || genericClickable;
         if (!visible || disabled || !interactive || editableField) return null;
-        const id = `${inspectionId}-auto-${index}`;
-        el.setAttribute('data-auto-id', id);
         const text = (
           el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || ''
         ).trim().replace(/\s+/g, ' ').slice(0, 100);
+        const aria = (el.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ').slice(0, 100);
+        const mediaElement = tag === 'audio' || tag === 'video';
+        const explicitMediaControl = mediaElement || mediaOnlyText.test(text) || mediaOnlyText.test(aria);
+        if (explicitMediaControl && !answerControl) return null;
+        const id = `${inspectionId}-auto-${index}`;
+        el.setAttribute('data-auto-id', id);
         return {
           id,
           parentId: el.parentElement ? all.indexOf(el.parentElement) : null,
@@ -497,6 +539,56 @@ function isPassiveTransitionScreen(text) {
 
   function pageSignature(state) {
     return `${page.url()}\n${state.pageText}`;
+  }
+
+  async function hasVisibleEditableInput() {
+    const fields = page.locator('input:not([type]), input[type="text"], input[type="email"], input[type="password"], input[type="search"], input[type="tel"], input[type="url"], textarea');
+    const count = await fields.count();
+    for (let i = 0; i < count; i++) {
+      if (await fields.nth(i).isVisible().catch(() => false)) return true;
+    }
+    return false;
+  }
+
+  async function handleSkippableInputRequirement(state) {
+    if (!isSpeechInputScreen(state.pageText)) return false;
+    const result = await page.evaluate(() => {
+      const escapePattern = /^(skip|skip for now|not now|maybe later|later|do this later|do it later|continue without(?: this)?|continue without speaking|no thanks|no, thanks|i'll do this later|i will do this later)$/i;
+      const elements = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"]'));
+      const candidates = [];
+      for (let i = 0; i < elements.length; i++) {
+        const el = elements[i];
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        const visible = rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
+          rect.top < window.innerHeight && rect.left < window.innerWidth &&
+          style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0;
+        if (!visible) continue;
+        const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim().replace(/\s+/g, ' ');
+        if (!escapePattern.test(text)) continue;
+        candidates.push({ el, text, area: rect.width * rect.height, top: rect.top, right: window.innerWidth - rect.right });
+      }
+      if (!candidates.length) return null;
+      candidates.sort((a, b) => {
+        const aCorner = (a.top < window.innerHeight * 0.25 ? 1 : 0) + (a.right < window.innerWidth * 0.25 ? 1 : 0);
+        const bCorner = (b.top < window.innerHeight * 0.25 ? 1 : 0) + (b.right < window.innerWidth * 0.25 ? 1 : 0);
+        return bCorner - aCorner || a.area - b.area;
+      });
+      const chosen = candidates[0];
+      const id = `skip-input-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+      chosen.el.setAttribute('data-skip-input-id', id);
+      return { id, text: chosen.text };
+    });
+
+    if (!result) {
+      console.log('Speech/input screen detected, but no safe skip option was found.');
+      return false;
+    }
+
+    console.log('Optional speech/input requirement detected. Using escape option:', result.text);
+    const before = pageSignature(state);
+    await safeCrawlerClick(page.locator(`[data-skip-input-id="${result.id}"]`), result.text || 'skip input');
+    return await waitForAdvancement(before, 12000);
   }
 
   async function handleCustomNativeLanguage(state) {
@@ -674,9 +766,10 @@ function isPassiveTransitionScreen(text) {
 
     while (Date.now() - startedAt < effectiveTimeoutMs) {
       await page.waitForTimeout(pollMs);
+      await silenceMedia();
       const state = await inspectPage();
       const signature = pageSignature(state);
-      const actionable = state.group.length > 0 || state.cta !== null || isNativeLanguageQuestion(state.pageText);
+      const actionable = state.group.length > 0 || state.cta !== null || isNativeLanguageQuestion(state.pageText) || isSpeechInputScreen(state.pageText);
 
       if (actionable) {
         if (passiveTransition) console.log('Passive transition completed: actionable screen appeared.');
@@ -708,6 +801,7 @@ function isPassiveTransitionScreen(text) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
       await page.waitForTimeout(500);
+      await silenceMedia();
       const currentState = await inspectPage();
       if (pageSignature(currentState) !== beforeSignature) return true;
     }
@@ -952,6 +1046,132 @@ function isPassiveTransitionScreen(text) {
     return { recognized: false, advanced: false };
   }
 
+  async function isLikelyBranchTransition(state) {
+    if (!state) return false;
+    if (state.group.length > 0) return false;
+    if (isNativeLanguageQuestion(state.pageText)) return false;
+    if (await hasVisibleEditableInput()) return false;
+    return true;
+  }
+
+  async function restoreQuestionPage(questionUrl, expectedOptions) {
+    const expected = expectedOptions.map(x => (x || '').trim().toLowerCase()).filter(Boolean);
+    const matchesQuestion = state => {
+      if (!state || state.group.length < 2) return false;
+      const current = state.group.map(x => (x.text || '').trim().toLowerCase());
+      const overlap = expected.filter(text => current.includes(text)).length;
+      return overlap >= Math.min(2, expected.length);
+    };
+
+    try {
+      await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 });
+      await page.waitForTimeout(700);
+      await silenceMedia();
+      let state = await inspectPage();
+      if (matchesQuestion(state)) return state;
+    } catch {}
+
+    try {
+      await page.goto(questionUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.waitForTimeout(800);
+      await silenceMedia();
+      const state = await inspectPage();
+      if (matchesQuestion(state)) return state;
+    } catch {}
+
+    return null;
+  }
+
+  async function chooseBranchOptionAndAdvance(optionText) {
+    let state = await inspectPage();
+    const wanted = (optionText || '').trim().toLowerCase();
+    let option = state.group.find(x => (x.text || '').trim().toLowerCase() === wanted);
+    if (!option) option = state.group.find(x => (x.text || '').trim().toLowerCase().includes(wanted));
+    if (!option) return false;
+
+    const before = pageSignature(state);
+    await safeCrawlerClick(page.locator(`[data-auto-id="${option.id}"]`), option.text || 'branch answer');
+    await page.waitForTimeout(700);
+    let after = await inspectPage();
+    if (pageSignature(after) !== before) return true;
+
+    if (after.cta) {
+      const beforeCTA = pageSignature(after);
+      await safeCrawlerClick(page.locator(`[data-auto-id="${after.cta.id}"]`), after.cta.text || 'branch CTA');
+      if (await waitForAdvancement(beforeCTA, 12000)) return true;
+    }
+
+    after = await inspectPage();
+    return pageSignature(after) !== before;
+  }
+
+  async function exploreAnswerBranches(state, screenNumber) {
+    const instruction = getSelectionInstruction(state.pageText);
+    if (isNativeLanguageQuestion(state.pageText)) return false;
+    if (state.group.length < 2 || state.group.length > 10) return false;
+    if (instruction.minSelections !== 1 || instruction.maxSelections !== 1) return false;
+
+    const optionTexts = state.group.map(x => (x.text || '').trim()).filter(Boolean);
+    if (optionTexts.length < 2) return false;
+
+    const questionUrl = page.url();
+    console.log('Checking whether this single-select question has answer-dependent transition pages.');
+
+    const firstAdvanced = await chooseBranchOptionAndAdvance(optionTexts[0]);
+    if (!firstAdvanced) {
+      await restoreQuestionPage(questionUrl, optionTexts);
+      return false;
+    }
+
+    await page.waitForTimeout(800);
+    await silenceMedia();
+    let landingState = await inspectPage();
+    const looksLikeTransition = await isLikelyBranchTransition(landingState);
+    if (!looksLikeTransition) {
+      console.log('Next screen looks like a normal interactive question/form, so branch exploration is not needed here.');
+      await restoreQuestionPage(questionUrl, optionTexts);
+      return false;
+    }
+
+    console.log(`Answer-dependent transition candidate found. Exploring ${optionTexts.length} answer branches.`);
+
+    for (let i = 0; i < optionTexts.length; i++) {
+      if (i > 0) {
+        const restored = await restoreQuestionPage(questionUrl, optionTexts);
+        if (!restored) {
+          console.log('Could not safely return to the branch question. Ending branch exploration.');
+          break;
+        }
+        const advanced = await chooseBranchOptionAndAdvance(optionTexts[i]);
+        if (!advanced) {
+          console.log('Could not advance branch for option:', optionTexts[i]);
+          continue;
+        }
+        await page.waitForTimeout(800);
+        await silenceMedia();
+        landingState = await inspectPage();
+      }
+
+      if (!(await isLikelyBranchTransition(landingState))) {
+        console.log('Branch did not lead to a transition-type page:', optionTexts[i]);
+        continue;
+      }
+
+      const branchName = `${String(screenNumber).padStart(2, '0')}${branchLetter(i)}.png`;
+      await page.screenshot({ path: branchName, fullPage: true });
+      console.log(`Captured branch transition for "${optionTexts[i]}": ${branchName}`);
+    }
+
+    const restored = await restoreQuestionPage(questionUrl, optionTexts);
+    if (!restored) {
+      console.log('Branch pages were captured, but the crawler could not safely restore the main question.');
+      return false;
+    }
+
+    console.log('Branch exploration complete. Continuing main funnel through the first answer.');
+    return await chooseBranchOptionAndAdvance(optionTexts[0]);
+  }
+
   async function advanceOneScreen(state) {
     const handledEnglishLanguageChoice = await handleEnglishLanguageChoice();
     if (handledEnglishLanguageChoice) return true;
@@ -959,6 +1179,8 @@ function isPassiveTransitionScreen(text) {
       const handledCustomLanguage = await handleCustomNativeLanguage(state);
       if (handledCustomLanguage) return true;
     }
+    const skippedOptionalInput = await handleSkippableInputRequirement(state);
+    if (skippedOptionalInput) return true;
     if (state.group.length > 0) return await handleAnswerGroup(state);
     const formResult = await handleGenericFormInput(state);
     if (formResult.recognized) return formResult.advanced;
@@ -979,6 +1201,7 @@ function isPassiveTransitionScreen(text) {
   for (let screenNumber = 1; screenNumber <= MAX_SCREENS; screenNumber++) {
     await waitForVisualSettle();
     await dismissBlockingConsentOverlay();
+    await silenceMedia();
     const state = await inspectPage();
     const paywallState = await inspectPaywallState();
     const filename = `${String(screenNumber).padStart(2, '0')}.png`;
@@ -1000,7 +1223,14 @@ function isPassiveTransitionScreen(text) {
     }
 
     const beforeSignature = pageSignature(state);
-    const acted = await advanceOneScreen(state);
+    let acted = false;
+    if (state.group.length >= 2) {
+      acted = await exploreAnswerBranches(state, screenNumber);
+    }
+    if (!acted) {
+      const refreshedState = await inspectPage();
+      acted = await advanceOneScreen(refreshedState);
+    }
     if (!acted) {
       console.log('No safe interaction pattern detected. Stopping.');
       break;
