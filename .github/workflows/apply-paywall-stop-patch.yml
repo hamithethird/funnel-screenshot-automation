@@ -1,0 +1,33 @@
+name: Apply paywall stop patch
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-paywall-stop-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Patch and syntax-check crawler
+        run: |
+          python scripts/apply_paywall_stop_patch.py
+          node --check funnel-crawler-multiscreen.js
+      - name: Commit crawler change
+        run: |
+          if git diff --quiet -- funnel-crawler-multiscreen.js; then
+            echo "No crawler changes needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add funnel-crawler-multiscreen.js
+          git commit -m "Detect plan pricing paywalls and stop after capture"
+          git push origin HEAD:main
