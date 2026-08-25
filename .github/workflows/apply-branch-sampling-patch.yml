@@ -31,3 +31,4 @@ jobs:
           git add funnel-crawler-multiscreen.js
           git commit -m "Probe branch outcomes before saving conditional screenshots"
           git push origin HEAD:main
+# retry
