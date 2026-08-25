@@ -1,4 +1,6 @@
 const { chromium } = require('playwright');
+const fs = require('fs');
+const path = require('path');
 
 function isNativeLanguageQuestion(text) {
   const normalized = (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -193,6 +195,32 @@ function sanitizeUrl(rawUrl) {
     process.exit(1);
   }
 
+  function deriveFunnelName(rawUrl) {
+    try {
+      const hostname = new URL(rawUrl).hostname.toLowerCase().replace(/^www\./, '');
+      const labels = hostname.split('.').filter(Boolean);
+      const base = labels.length >= 2 ? labels[labels.length - 2] : labels[0] || 'funnel';
+      return base.replace(/^get(?=[a-z])/, '').replace(/[^a-z0-9]+/g, ' ').trim() || 'funnel';
+    } catch {
+      return 'funnel';
+    }
+  }
+
+  function createRunOutputDirectory(rawUrl) {
+    const funnelName = deriveFunnelName(rawUrl);
+    let version = 1;
+    let dir;
+    do {
+      dir = path.resolve(process.cwd(), `${funnelName} funnel v${version}`);
+      version += 1;
+    } while (fs.existsSync(dir));
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  const OUTPUT_DIR = createRunOutputDirectory(url);
+  console.log('Saving screenshots to:', OUTPUT_DIR);
+
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   await page.goto(url, { waitUntil: 'networkidle' });
@@ -235,7 +263,7 @@ function sanitizeUrl(rawUrl) {
   function nextSupplementalFilename(screenNumber) {
     const current = supplementalCounterByScreen.get(screenNumber) || 0;
     supplementalCounterByScreen.set(screenNumber, current + 1);
-    return `${String(screenNumber).padStart(2, '0')}${branchLetter(current)}.png`;
+    return path.join(OUTPUT_DIR, `${String(screenNumber).padStart(2, '0')}${branchLetter(current)}.png`);
   }
 
   function supplementalFingerprintSeen(screenNumber, fingerprint, threshold = 0.95) {
@@ -1488,11 +1516,25 @@ function sanitizeUrl(rawUrl) {
     return { recognized: false, advanced: false };
   }
 
-  async function isLikelyBranchTransition(state) {
+  async function isLikelyBranchTransition(state, questionState = null) {
     if (!state) return false;
-    if (state.group.length > 0) return false;
     if (isNativeLanguageQuestion(state.pageText)) return false;
     if (await hasVisibleEditableInput()) return false;
+
+    const normalized = (state.pageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const questionish = /\b(select all that apply|choose all that apply|select one|choose one|pick one|choose\s+\d+|select\s+\d+|pick\s+\d+|which|what(?:'s| is| are| do| would)|how (?:often|do|would|well|much)|tell us|tell me)\b/i.test(normalized);
+    const hasMultipleAnswerLikeChoices = state.group.length >= 2 && questionish;
+    if (hasMultipleAnswerLikeChoices) return false;
+
+    if (questionState) {
+      const before = normalizeContextText(questionState.pageText || '');
+      const after = normalizeContextText(state.pageText || '');
+      if (before && after && contextSimilarity(before, after) >= 0.92) return false;
+    }
+
+    // Informational/conditional screens may contain cards or a Continue CTA that
+    // superficially look interactive. If the page no longer reads like a question,
+    // treat it as a transition candidate even when a weak answer group was inferred.
     return true;
   }
 
@@ -1579,11 +1621,35 @@ function sanitizeUrl(rawUrl) {
     return { advanced: pageSignature(after) !== before, landingState: after };
   }
 
+  async function answerGroupIsInsideActiveModal(state) {
+    if (!state?.group?.length) return false;
+    return await page.evaluate((ids) => {
+      const dialogSelector = '[role="dialog"], [aria-modal="true"], [class*="modal" i], [class*="popup" i], [class*="overlay" i], [class*="sheet" i]';
+      const visible = el => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 &&
+          r.top < window.innerHeight && r.left < window.innerWidth &&
+          s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) > 0;
+      };
+      let inside = 0;
+      for (const id of ids) {
+        const el = document.querySelector(`[data-auto-id="${CSS.escape(id)}"]`);
+        if (el && el.closest(dialogSelector) && visible(el.closest(dialogSelector))) inside++;
+      }
+      return inside >= Math.ceil(ids.length * 0.6);
+    }, state.group.map(x => x.id)).catch(() => false);
+  }
+
   async function exploreAnswerBranches(state, screenNumber) {
     const instruction = getSelectionInstruction(state.pageText);
     if (isNativeLanguageQuestion(state.pageText)) return false;
     if (isSpeechInputScreen(state.pageText) || hasSkipEscapeChoice(state)) {
       console.log('Skip/optional-input screen detected. Bypassing branch exploration so the escape action can be used.');
+      return false;
+    }
+    if (await answerGroupIsInsideActiveModal(state)) {
+      console.log('Answer group is inside an active modal/dialog. Treating it as a normal required choice, not a branch point.');
       return false;
     }
     if (state.group.length < 2 || state.group.length > 10) return false;
@@ -1603,7 +1669,7 @@ function sanitizeUrl(rawUrl) {
     }
 
     let landingState = firstResult.landingState;
-    const looksLikeTransition = await isLikelyBranchTransition(landingState);
+    const looksLikeTransition = await isLikelyBranchTransition(landingState, questionState);
     if (!looksLikeTransition) {
       console.log('Next screen looks like a normal interactive question/form, so branch exploration is not needed here.');
       await restoreQuestionPage(questionUrl, optionTexts);
@@ -1627,7 +1693,7 @@ function sanitizeUrl(rawUrl) {
         landingState = result.landingState;
       }
 
-      if (!(await isLikelyBranchTransition(landingState))) {
+      if (!(await isLikelyBranchTransition(landingState, questionState))) {
         console.log('Branch did not lead to a transition-type page:', optionTexts[i]);
         continue;
       }
@@ -1635,13 +1701,24 @@ function sanitizeUrl(rawUrl) {
       await waitForScreenshotReady({ minimumWaitMs: 2400, maxWaitMs: 6000 });
       landingState = await inspectPage();
       const transitionFingerprint = normalizeContextText(landingState.pageText);
+
+      // The first answer is the main path. Do not save it as 04a/05a here,
+      // because the normal crawler loop will capture that same landing page as
+      // the next numbered screenshot. We only register its fingerprint so
+      // alternate answers that lead to the same page are not saved as duplicates.
+      if (i === 0) {
+        supplementalFingerprintSeenExact(screenNumber, transitionFingerprint);
+        console.log(`Main-path transition for "${optionTexts[i]}" will be captured as the next numbered screen.`);
+        continue;
+      }
+
       if (supplementalFingerprintSeenExact(screenNumber, transitionFingerprint)) {
-        console.log(`Transition for "${optionTexts[i]}" has exactly the same meaningful text as a transition already captured. Skipping duplicate screenshot.`);
+        console.log(`Transition for "${optionTexts[i]}" has the same meaningful text as a transition already seen. Skipping duplicate screenshot.`);
         continue;
       }
       const branchName = nextSupplementalFilename(screenNumber);
       await page.screenshot({ path: branchName, fullPage: true });
-      console.log(`Captured unique branch transition for "${optionTexts[i]}": ${branchName}`);
+      console.log(`Captured unique alternate branch transition for "${optionTexts[i]}": ${branchName}`);
     }
 
     const restored = await restoreQuestionPage(questionUrl, optionTexts);
@@ -1702,7 +1779,7 @@ function sanitizeUrl(rawUrl) {
     await silenceMedia();
     const state = await inspectPage();
     const paywallState = await inspectPaywallState();
-    const filename = `${String(screenNumber).padStart(2, '0')}.png`;
+    const filename = path.join(OUTPUT_DIR, `${String(screenNumber).padStart(2, '0')}.png`);
     await page.screenshot({ path: filename, fullPage: true });
     console.log(`\nCaptured ${filename}`);
     console.log({
