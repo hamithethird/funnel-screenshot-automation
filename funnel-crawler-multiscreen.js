@@ -110,11 +110,16 @@ function isSpeechInputScreen(text) {
 }
 
 const skipEscapePattern = /^(skip|skip for now|not now|maybe later|later|do this later|do it later|continue without(?: this)?|continue without speaking|no thanks|no, thanks|i'll do this later|i will do this later)$/i;
+const strongNavigationPattern = /^(continue|next|proceed|submit|done|finish|start|see results?|get started|create account|sign up|go on|keep going|move on|let(?:'|’)s continue|let(?:'|’)s go|devam|devam et|ileri)$/i;
 
 function hasSkipEscapeChoice(state) {
   if (!state) return false;
   const texts = [state.cta?.text || '', ...(state.group || []).map(item => item.text || '')];
   return texts.some(text => skipEscapePattern.test(text.trim()));
+}
+
+function isStrongNavigationText(text) {
+  return strongNavigationPattern.test((text || '').trim());
 }
 
 function branchLetter(index) {
@@ -467,7 +472,7 @@ function contextSimilarity(a, b) {
       const all = Array.from(document.querySelectorAll('*'));
       const pageText = document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 3000);
       const questionSignals = /\b(select all that apply|choose all that apply|select any|choose any|select one|choose one|pick one|choose\s+\d+|select\s+\d+|pick\s+\d+|or more|at least|which|what(?:'s| is| are| do| would)|how (?:often|do|would|well|much))\b/i;
-      const navigationText = /^(continue|next|proceed|submit|done|finish|start|see results?|get started|create account|sign up|go on)$/i;
+      const navigationText = /^(continue|next|proceed|submit|done|finish|start|see results?|get started|create account|sign up|go on|keep going|move on|let(?:'|’)s continue|let(?:'|’)s go|devam|devam et|ileri)$/i;
       const mediaOnlyText = /^(play|pause|listen|listen again|replay|audio|sound|hear|speaker)$/i;
 
       const controls = all.map((el, index) => {
@@ -555,6 +560,7 @@ function contextSimilarity(a, b) {
       let bestGroup = null;
       for (const items of groups.values()) {
         if (items.length < 2 || items.length > 24) continue;
+        if (items.some(item => navigationText.test((item.text || '').trim()))) continue;
         const avgWidth = items.reduce((sum, x) => sum + x.width, 0) / items.length;
         const avgHeight = items.reduce((sum, x) => sum + x.height, 0) / items.length;
         const similarSizes = items.every(item =>
@@ -591,7 +597,7 @@ function contextSimilarity(a, b) {
         else if (widthRatio >= 0.5) score += 20;
         if (item.height >= 40 && item.height <= 100) score += 20;
         if (item.navigationControl) score += 20;
-        if (navigationText.test(item.text.trim())) score += 60;
+        if (navigationText.test(item.text.trim())) score += 80;
         if (item.text.length > 0 && item.text.length <= 50) score += 10;
         if (item.inputType === 'submit' || item.inputType === 'button') score += 20;
         if (item.width < 80 || item.height < 25) score -= 50;
@@ -609,6 +615,59 @@ function contextSimilarity(a, b) {
 
   function pageSignature(state) {
     return `${page.url()}\n${state.pageText}`;
+  }
+
+  async function findBottomNavigationFallback() {
+    return await page.evaluate(() => {
+      const pattern = /^(continue|next|proceed|submit|done|finish|start|see results?|get started|create account|sign up|go on|keep going|move on|let(?:'|’)s continue|let(?:'|’)s go|devam|devam et|ileri)$/i;
+      const all = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], input[type="submit"], input[type="button"], [onclick], [tabindex]'));
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const candidates = [];
+      for (const el of all) {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        const text = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim().replace(/\s+/g, ' ');
+        const visible = rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < vh && rect.left < vw && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0;
+        const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true' || style.pointerEvents === 'none';
+        if (!visible || disabled || !pattern.test(text)) continue;
+        const centerY = rect.top + rect.height / 2;
+        const widthRatio = rect.width / vw;
+        let score = 0;
+        if (centerY > vh * 0.78) score += 120;
+        else if (centerY > vh * 0.62) score += 70;
+        if (widthRatio >= 0.72) score += 55;
+        else if (widthRatio >= 0.45) score += 30;
+        if (rect.height >= 38 && rect.height <= 110) score += 25;
+        if (el.tagName.toLowerCase() === 'button' || el.getAttribute('role') === 'button') score += 20;
+        candidates.push({ el, text, score });
+      }
+      if (!candidates.length) return null;
+      candidates.sort((a, b) => b.score - a.score);
+      const chosen = candidates[0];
+      const id = `bottom-navigation-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+      chosen.el.setAttribute('data-bottom-navigation-id', id);
+      return { id, text: chosen.text, score: chosen.score };
+    });
+  }
+
+  async function clickStrongNavigation(state, description = 'primary navigation CTA') {
+    if (state?.cta && isStrongNavigationText(state.cta.text)) {
+      console.log('Strong navigation CTA detected:', state.cta.text);
+      const before = pageSignature(state);
+      await safeCrawlerClick(page.locator(`[data-auto-id="${state.cta.id}"]`), state.cta.text || description);
+      await page.waitForTimeout(900);
+      return pageSignature(await inspectPage()) !== before;
+    }
+
+    const fallback = await findBottomNavigationFallback();
+    if (!fallback) return false;
+    console.log('Bottom primary navigation fallback detected:', fallback.text);
+    const beforeState = await inspectPage();
+    const before = pageSignature(beforeState);
+    await safeCrawlerClick(page.locator(`[data-bottom-navigation-id="${fallback.id}"]`), fallback.text || description);
+    await page.waitForTimeout(900);
+    return pageSignature(await inspectPage()) !== before;
   }
 
   async function captureSupplementalState(screenNumber, state, reason, removeTexts = [], threshold = 0.95) {
@@ -1367,6 +1426,10 @@ function contextSimilarity(a, b) {
     }
     const skippedOptionalInput = await handleSkippableInputRequirement(state);
     if (skippedOptionalInput) return true;
+
+    const strongNavigationClicked = await clickStrongNavigation(state);
+    if (strongNavigationClicked) return true;
+
     if (state.group.length > 0) return await handleAnswerGroup(state, screenNumber);
     const formResult = await handleGenericFormInput(state);
     if (formResult.recognized) return formResult.advanced;
@@ -1377,6 +1440,10 @@ function contextSimilarity(a, b) {
       await page.waitForTimeout(900);
       return pageSignature(await inspectPage()) !== beforeSignature;
     }
+
+    const fallbackNavigationClicked = await clickStrongNavigation(await inspectPage());
+    if (fallbackNavigationClicked) return true;
+
     const delayedResult = await waitForActionableState();
     if (!delayedResult) return false;
     if (delayedResult.changed) return true;
@@ -1410,7 +1477,7 @@ function contextSimilarity(a, b) {
 
     const beforeSignature = pageSignature(state);
     let acted = false;
-    if (state.group.length >= 2 && !isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state)) {
+    if (state.group.length >= 2 && !isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state) && !isStrongNavigationText(state.cta?.text || '')) {
       acted = await exploreAnswerBranches(state, screenNumber);
     }
     if (!acted) {
