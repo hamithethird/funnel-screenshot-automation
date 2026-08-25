@@ -119,6 +119,47 @@ function branchLetter(index) {
   return out;
 }
 
+function normalizeContextText(text, removeTexts = []) {
+  let normalized = (text || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\b\d+(?:[.,]\d+)?%?\b/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  for (const item of removeTexts) {
+    const remove = (item || '')
+      .toLowerCase()
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (remove.length >= 2) normalized = normalized.split(remove).join(' ');
+  }
+
+  return normalized
+    .replace(/\b(continue|next|back|skip|ileri|devam|geri)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function contextSimilarity(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const tokensA = new Set(a.split(' ').filter(token => token.length > 1));
+  const tokensB = new Set(b.split(' ').filter(token => token.length > 1));
+  if (!tokensA.size || !tokensB.size) return 0;
+  let intersection = 0;
+  for (const token of tokensA) if (tokensB.has(token)) intersection++;
+  const union = new Set([...tokensA, ...tokensB]).size;
+  const jaccard = union ? intersection / union : 0;
+  const containment = intersection / Math.min(tokensA.size, tokensB.size);
+  return Math.max(jaccard, containment * 0.92);
+}
+
 (async () => {
   const url = process.argv[2];
   if (!url) {
@@ -162,6 +203,23 @@ function branchLetter(index) {
   }
 
   const RUN_PASSWORD = generateRunPassword(16);
+  const supplementalCounterByScreen = new Map();
+  const supplementalFingerprintsByScreen = new Map();
+
+  function nextSupplementalFilename(screenNumber) {
+    const current = supplementalCounterByScreen.get(screenNumber) || 0;
+    supplementalCounterByScreen.set(screenNumber, current + 1);
+    return `${String(screenNumber).padStart(2, '0')}${branchLetter(current)}.png`;
+  }
+
+  function supplementalFingerprintSeen(screenNumber, fingerprint, threshold = 0.82) {
+    const seen = supplementalFingerprintsByScreen.get(screenNumber) || [];
+    const match = seen.find(existing => contextSimilarity(existing, fingerprint) >= threshold);
+    if (match) return true;
+    seen.push(fingerprint);
+    supplementalFingerprintsByScreen.set(screenNumber, seen);
+    return false;
+  }
 
   async function silenceMedia() {
     await page.evaluate(() => {
@@ -541,6 +599,52 @@ function branchLetter(index) {
     return `${page.url()}\n${state.pageText}`;
   }
 
+  async function captureSupplementalState(screenNumber, state, reason, removeTexts = [], threshold = 0.82) {
+    const fingerprint = normalizeContextText(state?.pageText || '', removeTexts);
+    if (!fingerprint || fingerprint.length < 10) return null;
+    if (supplementalFingerprintSeen(screenNumber, fingerprint, threshold)) {
+      console.log(`Supplemental state is contextually the same as one already captured. Skipping duplicate (${reason}).`);
+      return null;
+    }
+    const filename = nextSupplementalFilename(screenNumber);
+    await page.screenshot({ path: filename, fullPage: true });
+    console.log(`Captured supplemental state (${reason}): ${filename}`);
+    return filename;
+  }
+
+  async function waitForScreenshotReady({ minimumWaitMs = 2200, maxWaitMs = 5500, pollMs = 300 } = {}) {
+    await page.waitForTimeout(minimumWaitMs);
+    let previous = null;
+    let stableCount = 0;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < Math.max(0, maxWaitMs - minimumWaitMs)) {
+      await silenceMedia();
+      const snapshot = await page.evaluate(() => {
+        const runningFiniteAnimations = document.getAnimations
+          ? document.getAnimations().filter(animation => {
+              if (animation.playState !== 'running') return false;
+              const timing = animation.effect?.getComputedTiming?.();
+              if (!timing) return true;
+              return Number.isFinite(timing.endTime) && timing.endTime <= 6000;
+            }).length
+          : 0;
+        return {
+          text: document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 2500),
+          height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
+          runningFiniteAnimations
+        };
+      });
+      if (previous && snapshot.text === previous.text && snapshot.height === previous.height && snapshot.runningFiniteAnimations === 0) {
+        stableCount++;
+        if (stableCount >= 2) return;
+      } else {
+        stableCount = 0;
+      }
+      previous = snapshot;
+      await page.waitForTimeout(pollMs);
+    }
+  }
+
   async function hasVisibleEditableInput() {
     const fields = page.locator('input:not([type]), input[type="text"], input[type="email"], input[type="password"], input[type="search"], input[type="tel"], input[type="url"], textarea');
     const count = await fields.count();
@@ -651,8 +755,10 @@ function branchLetter(index) {
     return false;
   }
 
-  async function handleAnswerGroup(state) {
+  async function handleAnswerGroup(state, screenNumber = null) {
     const initialSignature = pageSignature(state);
+    const initialState = state;
+    const initialUrl = page.url();
     const instruction = getSelectionInstruction(state.pageText);
     const availableAtStart = Math.max(state.group.length, 1);
     const minSelections = Math.max(1, Math.min(instruction.minSelections || 1, availableAtStart));
@@ -698,6 +804,18 @@ function branchLetter(index) {
       await page.waitForTimeout(650);
 
       const afterSelection = await inspectPage();
+      const samePageSelectionState = page.url() === initialUrl && afterSelection.group.length > 0;
+      const contextChanged = normalizeContextText(afterSelection.pageText) !== normalizeContextText(initialState.pageText);
+      if (screenNumber !== null && samePageSelectionState && contextChanged && selectedKeys.size >= minSelections) {
+        await captureSupplementalState(
+          screenNumber,
+          afterSelection,
+          'post-selection response/popup',
+          [option.text],
+          0.9
+        );
+      }
+
       if (pageSignature(afterSelection) !== initialSignature && !afterSelection.group.length) return true;
 
       if (selectedKeys.size < minSelections) {
@@ -731,21 +849,37 @@ function branchLetter(index) {
     return pageSignature(finalState) !== initialSignature;
   }
 
-  async function waitForVisualSettle({ initialWaitMs = 2000, checkMs = 400, maxExtraWaitMs = 2000 } = {}) {
+  async function waitForVisualSettle({ initialWaitMs = 2200, checkMs = 350, maxExtraWaitMs = 3500 } = {}) {
     await page.waitForTimeout(initialWaitMs);
-    let previousSnapshot = await page.evaluate(() => ({
-      text: document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 2000),
-      height: document.documentElement.scrollHeight
-    }));
+    let previousSnapshot = null;
+    let stableCount = 0;
     const startedAt = Date.now();
     while (Date.now() - startedAt < maxExtraWaitMs) {
-      await page.waitForTimeout(checkMs);
+      await silenceMedia();
       const currentSnapshot = await page.evaluate(() => ({
-        text: document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 2000),
-        height: document.documentElement.scrollHeight
+        text: document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 2200),
+        height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
+        runningFiniteAnimations: document.getAnimations
+          ? document.getAnimations().filter(animation => {
+              if (animation.playState !== 'running') return false;
+              const timing = animation.effect?.getComputedTiming?.();
+              return !timing || (Number.isFinite(timing.endTime) && timing.endTime <= 6000);
+            }).length
+          : 0
       }));
-      if (currentSnapshot.text === previousSnapshot.text && currentSnapshot.height === previousSnapshot.height) return;
+      if (
+        previousSnapshot &&
+        currentSnapshot.text === previousSnapshot.text &&
+        currentSnapshot.height === previousSnapshot.height &&
+        currentSnapshot.runningFiniteAnimations === 0
+      ) {
+        stableCount++;
+        if (stableCount >= 2) return;
+      } else {
+        stableCount = 0;
+      }
       previousSnapshot = currentSnapshot;
+      await page.waitForTimeout(checkMs);
     }
   }
 
@@ -1082,27 +1216,58 @@ function branchLetter(index) {
     return null;
   }
 
-  async function chooseBranchOptionAndAdvance(optionText) {
+  async function chooseBranchOptionAndAdvance(optionText, screenNumber, questionState) {
     let state = await inspectPage();
     const wanted = (optionText || '').trim().toLowerCase();
     let option = state.group.find(x => (x.text || '').trim().toLowerCase() === wanted);
     if (!option) option = state.group.find(x => (x.text || '').trim().toLowerCase().includes(wanted));
-    if (!option) return false;
+    if (!option) return { advanced: false, landingState: null };
 
+    const questionUrl = page.url();
     const before = pageSignature(state);
     await safeCrawlerClick(page.locator(`[data-auto-id="${option.id}"]`), option.text || 'branch answer');
     await page.waitForTimeout(700);
     let after = await inspectPage();
-    if (pageSignature(after) !== before) return true;
+
+    if (page.url() === questionUrl && after.group.length > 0) {
+      const beforeText = normalizeContextText(questionState?.pageText || state.pageText, [optionText]);
+      const afterText = normalizeContextText(after.pageText, [optionText]);
+      if (afterText && beforeText !== afterText) {
+        await captureSupplementalState(
+          screenNumber,
+          after,
+          `post-selection response for "${optionText}"`,
+          [optionText],
+          0.9
+        );
+      }
+      if (after.cta) {
+        const beforeCTA = pageSignature(after);
+        await safeCrawlerClick(page.locator(`[data-auto-id="${after.cta.id}"]`), after.cta.text || 'branch CTA');
+        if (await waitForAdvancement(beforeCTA, 12000)) {
+          await waitForScreenshotReady();
+          return { advanced: true, landingState: await inspectPage() };
+        }
+      }
+      return { advanced: false, landingState: after };
+    }
+
+    if (pageSignature(after) !== before) {
+      await waitForScreenshotReady();
+      return { advanced: true, landingState: await inspectPage() };
+    }
 
     if (after.cta) {
       const beforeCTA = pageSignature(after);
       await safeCrawlerClick(page.locator(`[data-auto-id="${after.cta.id}"]`), after.cta.text || 'branch CTA');
-      if (await waitForAdvancement(beforeCTA, 12000)) return true;
+      if (await waitForAdvancement(beforeCTA, 12000)) {
+        await waitForScreenshotReady();
+        return { advanced: true, landingState: await inspectPage() };
+      }
     }
 
     after = await inspectPage();
-    return pageSignature(after) !== before;
+    return { advanced: pageSignature(after) !== before, landingState: after };
   }
 
   async function exploreAnswerBranches(state, screenNumber) {
@@ -1115,17 +1280,16 @@ function branchLetter(index) {
     if (optionTexts.length < 2) return false;
 
     const questionUrl = page.url();
+    const questionState = state;
     console.log('Checking whether this single-select question has answer-dependent transition pages.');
 
-    const firstAdvanced = await chooseBranchOptionAndAdvance(optionTexts[0]);
-    if (!firstAdvanced) {
+    let firstResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);
+    if (!firstResult.advanced || !firstResult.landingState) {
       await restoreQuestionPage(questionUrl, optionTexts);
       return false;
     }
 
-    await page.waitForTimeout(800);
-    await silenceMedia();
-    let landingState = await inspectPage();
+    let landingState = firstResult.landingState;
     const looksLikeTransition = await isLikelyBranchTransition(landingState);
     if (!looksLikeTransition) {
       console.log('Next screen looks like a normal interactive question/form, so branch exploration is not needed here.');
@@ -1142,14 +1306,12 @@ function branchLetter(index) {
           console.log('Could not safely return to the branch question. Ending branch exploration.');
           break;
         }
-        const advanced = await chooseBranchOptionAndAdvance(optionTexts[i]);
-        if (!advanced) {
+        const result = await chooseBranchOptionAndAdvance(optionTexts[i], screenNumber, questionState);
+        if (!result.advanced || !result.landingState) {
           console.log('Could not advance branch for option:', optionTexts[i]);
           continue;
         }
-        await page.waitForTimeout(800);
-        await silenceMedia();
-        landingState = await inspectPage();
+        landingState = result.landingState;
       }
 
       if (!(await isLikelyBranchTransition(landingState))) {
@@ -1157,9 +1319,16 @@ function branchLetter(index) {
         continue;
       }
 
-      const branchName = `${String(screenNumber).padStart(2, '0')}${branchLetter(i)}.png`;
+      await waitForScreenshotReady({ minimumWaitMs: 2400, maxWaitMs: 6000 });
+      landingState = await inspectPage();
+      const transitionFingerprint = normalizeContextText(landingState.pageText, optionTexts);
+      if (supplementalFingerprintSeen(screenNumber, transitionFingerprint, 0.8)) {
+        console.log(`Transition for "${optionTexts[i]}" is contextually the same as a transition already captured. Skipping duplicate screenshot.`);
+        continue;
+      }
+      const branchName = nextSupplementalFilename(screenNumber);
       await page.screenshot({ path: branchName, fullPage: true });
-      console.log(`Captured branch transition for "${optionTexts[i]}": ${branchName}`);
+      console.log(`Captured unique branch transition for "${optionTexts[i]}": ${branchName}`);
     }
 
     const restored = await restoreQuestionPage(questionUrl, optionTexts);
@@ -1169,10 +1338,11 @@ function branchLetter(index) {
     }
 
     console.log('Branch exploration complete. Continuing main funnel through the first answer.');
-    return await chooseBranchOptionAndAdvance(optionTexts[0]);
+    const finalResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);
+    return finalResult.advanced;
   }
 
-  async function advanceOneScreen(state) {
+  async function advanceOneScreen(state, screenNumber = null) {
     const handledEnglishLanguageChoice = await handleEnglishLanguageChoice();
     if (handledEnglishLanguageChoice) return true;
     if (isNativeLanguageQuestion(state.pageText)) {
@@ -1181,7 +1351,7 @@ function branchLetter(index) {
     }
     const skippedOptionalInput = await handleSkippableInputRequirement(state);
     if (skippedOptionalInput) return true;
-    if (state.group.length > 0) return await handleAnswerGroup(state);
+    if (state.group.length > 0) return await handleAnswerGroup(state, screenNumber);
     const formResult = await handleGenericFormInput(state);
     if (formResult.recognized) return formResult.advanced;
     if (state.cta) {
@@ -1194,7 +1364,7 @@ function branchLetter(index) {
     const delayedResult = await waitForActionableState();
     if (!delayedResult) return false;
     if (delayedResult.changed) return true;
-    return await advanceOneScreen(delayedResult.state);
+    return await advanceOneScreen(delayedResult.state, screenNumber);
   }
 
   const MAX_SCREENS = 100;
@@ -1229,7 +1399,7 @@ function branchLetter(index) {
     }
     if (!acted) {
       const refreshedState = await inspectPage();
-      acted = await advanceOneScreen(refreshedState);
+      acted = await advanceOneScreen(refreshedState, screenNumber);
     }
     if (!acted) {
       console.log('No safe interaction pattern detected. Stopping.');
