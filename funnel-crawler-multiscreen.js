@@ -1568,7 +1568,43 @@ function sanitizeUrl(rawUrl) {
       } catch (error) {
         lastError = error;
         const message = String(error?.message || error || '');
-        const navigationRace = /execution context was destroyed|cannot find context|most likely because of a navigation|frame was detached|target page, context or browser has been closed/i.test(message);
+        const navigationRace = /execution context was destroyed|cannot find context|most likely because of a navigation|frame was detached/i.test(message);
+        if (!navigationRace || attempt === attempts) throw error;
+        console.log(`Navigation was still settling during ${label}. Waiting before retry ${attempt + 1}/${attempts}.`);
+        await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(350 * attempt);
+      }
+    }
+    throw lastError;
+  }
+
+  async function evaluateNavigationSafe(pageFunction, label = 'page evaluation', attempts = 4) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await page.evaluate(pageFunction);
+      } catch (error) {
+        lastError = error;
+        const message = String(error?.message || error || '');
+        const navigationRace = /execution context was destroyed|cannot find context|most likely because of a navigation|frame was detached/i.test(message);
+        if (!navigationRace || attempt === attempts) throw error;
+        console.log(`Navigation was still settling during ${label}. Waiting before retry ${attempt + 1}/${attempts}.`);
+        await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(350 * attempt);
+      }
+    }
+    throw lastError;
+  }
+
+  async function screenshotBufferNavigationSafe(label = 'branch screenshot', attempts = 4) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await page.screenshot({ fullPage: true });
+      } catch (error) {
+        lastError = error;
+        const message = String(error?.message || error || '');
+        const navigationRace = /execution context was destroyed|cannot find context|most likely because of a navigation|frame was detached|navigation/i.test(message);
         if (!navigationRace || attempt === attempts) throw error;
         console.log(`Navigation was still settling during ${label}. Waiting before retry ${attempt + 1}/${attempts}.`);
         await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
@@ -1609,7 +1645,7 @@ function sanitizeUrl(rawUrl) {
     // step on one URL and manage state internally, so browser history is not a
     // reliable way to return from a transition screen to its source question.
     try {
-      const backCandidate = await page.evaluate(() => {
+      const backCandidate = await evaluateNavigationSafe(() => {
         const selectors = 'button, [role="button"], a, [onclick], [tabindex]';
         const elements = Array.from(document.querySelectorAll(selectors));
         const visible = el => {
@@ -1848,10 +1884,10 @@ function sanitizeUrl(rawUrl) {
       const result = await chooseBranchOptionAndAdvance(optionTexts[index], screenNumber, questionState);
       if (!result.advanced || !result.landingState) return { ok: false, reason: 'advance-failed' };
       await waitForScreenshotReady({ minimumWaitMs: 2200, maxWaitMs: 5800 });
-      const landingState = await inspectPage();
+      const landingState = await inspectPageNavigationSafe('branch outcome inspection');
       const fingerprint = normalizeContextText(landingState.pageText);
       if (!fingerprint) return { ok: false, reason: 'no-fingerprint' };
-      const screenshotBuffer = await page.screenshot({ fullPage: true });
+      const screenshotBuffer = await screenshotBufferNavigationSafe('branch outcome screenshot');
       outcomes.push({ index, optionText: optionTexts[index], fingerprint, screenshotBuffer, landingState });
       console.log(`Recorded immediate next-page outcome for "${optionTexts[index]}".`);
       return { ok: true };
