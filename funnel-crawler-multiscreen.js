@@ -428,77 +428,97 @@ function sanitizeUrl(rawUrl) {
         'romanian', 'română', 'hungarian', 'magyar', 'greek', 'ελληνικά'
       ];
       const normalize = value => (value || '').trim().toLowerCase().replace(/\s+/g, ' ');
-      const isVisible = el => {
+      const visible = el => {
         const rect = el.getBoundingClientRect();
         const style = getComputedStyle(el);
         return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
           rect.top < window.innerHeight && rect.left < window.innerWidth &&
           style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0;
       };
+      const reachable = el => {
+        if (!visible(el)) return false;
+        const rect = el.getBoundingClientRect();
+        const x = Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2));
+        const y = Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height / 2));
+        const top = document.elementFromPoint(x, y);
+        return !!top && (top === el || el.contains(top) || top.contains(el));
+      };
       const languageForText = text => languageNames.find(name =>
         text === name || text.startsWith(name + ' ') || text.startsWith(name + '|') ||
         text.startsWith(name + '/') || text.startsWith(name + '(')
       ) || null;
-      const cardForLabel = labelEl => {
+      const cardForLabel = (labelEl, root) => {
         let el = labelEl;
         let depth = 0;
         let fallback = null;
-        while (el && el !== document.body && depth < 6) {
+        while (el && el !== document.body && depth < 7) {
           const rect = el.getBoundingClientRect();
           const style = getComputedStyle(el);
           const tag = el.tagName.toLowerCase();
           const role = el.getAttribute('role');
-          const substantial = rect.width >= 70 && rect.height >= 38 &&
-            rect.width <= window.innerWidth * 0.95 && rect.height <= window.innerHeight * 0.55;
-          const explicitInteractive = tag === 'button' || tag === 'a' || tag === 'label' ||
-            role === 'button' || role === 'radio' || role === 'option' ||
+          const substantial = rect.width >= 55 && rect.height >= 28 && rect.width <= window.innerWidth * 0.98;
+          const explicit = tag === 'button' || tag === 'a' || tag === 'label' || tag === 'li' ||
+            role === 'button' || role === 'radio' || role === 'option' || role === 'menuitem' ||
             el.hasAttribute('onclick') || el.tabIndex >= 0 || style.cursor === 'pointer';
-          const hasVisibleBorder =
-            parseFloat(style.borderTopWidth || '0') > 0 || parseFloat(style.borderRightWidth || '0') > 0 ||
+          const bordered = parseFloat(style.borderTopWidth || '0') > 0 || parseFloat(style.borderRightWidth || '0') > 0 ||
             parseFloat(style.borderBottomWidth || '0') > 0 || parseFloat(style.borderLeftWidth || '0') > 0;
-          if (substantial && explicitInteractive) return el;
-          if (substantial && hasVisibleBorder && !fallback) fallback = el;
+          if (substantial && explicit && reachable(el)) return el;
+          if (substantial && bordered && reachable(el) && !fallback) fallback = el;
+          if (el === root) break;
           el = el.parentElement;
           depth++;
         }
+        if (reachable(labelEl)) return labelEl;
         return fallback;
       };
-      const all = Array.from(document.querySelectorAll('body *'));
-      const labels = [];
-      for (const el of all) {
-        if (!isVisible(el)) continue;
-        const text = normalize(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || '');
-        if (!text || text.length > 100) continue;
-        const matchedLanguage = languageForText(text);
-        if (!matchedLanguage) continue;
-        const card = cardForLabel(el);
-        if (!card || !isVisible(card)) continue;
-        const rect = card.getBoundingClientRect();
-        labels.push({ matchedLanguage, text, card, area: rect.width * rect.height });
+
+      const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]')).filter(visible);
+      const roots = dialogs.length ? dialogs : [document.body];
+      const candidates = [];
+      for (const root of roots) {
+        const all = [root, ...Array.from(root.querySelectorAll('*'))];
+        for (const el of all) {
+          if (!visible(el)) continue;
+          const text = normalize(el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || '');
+          if (!text || text.length > 100) continue;
+          const language = languageForText(text);
+          if (!language) continue;
+          const card = cardForLabel(el, root);
+          if (!card || !reachable(card)) continue;
+          const rect = card.getBoundingClientRect();
+          candidates.push({ language, text, card, area: rect.width * rect.height, inDialog: dialogs.includes(root) });
+        }
       }
-      const uniqueCards = [];
+
+      const unique = [];
       const seen = new Set();
-      for (const item of labels) {
+      for (const item of candidates) {
         if (seen.has(item.card)) continue;
         seen.add(item.card);
-        uniqueCards.push(item);
+        unique.push(item);
       }
-      const distinctLanguages = new Set(uniqueCards.map(x => x.matchedLanguage));
-      const englishCandidates = uniqueCards.filter(x => x.matchedLanguage === 'english').sort((a, b) => a.area - b.area);
-      if (distinctLanguages.size < 2 || englishCandidates.length === 0) return null;
-      const chosen = englishCandidates[0];
-      const autoId = `language-choice-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
-      chosen.card.setAttribute('data-language-choice-id', autoId);
-      return { value: autoId, text: chosen.text, languages: Array.from(distinctLanguages).slice(0, 10) };
+      const distinctLanguages = new Set(unique.map(x => x.language));
+      const english = unique.filter(x => x.language === 'english').sort((a, b) =>
+        Number(b.inDialog) - Number(a.inDialog) || a.area - b.area
+      );
+      if (distinctLanguages.size < 2 || !english.length) return null;
+      const chosen = english[0];
+      const id = `language-choice-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+      chosen.card.setAttribute('data-language-choice-id', id);
+      return { id, text: chosen.text, languages: Array.from(distinctLanguages).slice(0, 12), inDialog: chosen.inDialog };
     });
 
     if (!result) return false;
     console.log('Language-choice page detected. Preferring English. Languages found:', result.languages);
+    if (result.inDialog) console.log('English option is inside the active modal/dialog.');
     const beforeState = await inspectPage();
     const beforeSignature = pageSignature(beforeState);
-    const target = page.locator(`[data-language-choice-id="${result.value}"]`);
+    const target = page.locator(`[data-language-choice-id="${result.id}"]`);
     const clicked = await safeCrawlerClick(target, 'English language option');
-    if (!clicked) return false;
+    if (!clicked) {
+      console.log('English option was detected but is not safely reachable. Will not interact with controls behind the overlay.');
+      return false;
+    }
     await page.waitForTimeout(700);
     let afterState = await inspectPage();
     if (pageSignature(afterState) !== beforeSignature) {
@@ -899,44 +919,74 @@ function sanitizeUrl(rawUrl) {
     const inputCount = await textInputs.count();
     for (let i = 0; i < inputCount; i++) {
       const input = textInputs.nth(i);
-      if (!(await input.isVisible()) || !(await input.isEnabled())) continue;
+      if (!(await input.isVisible().catch(() => false)) || !(await input.isEnabled().catch(() => false))) continue;
+      const inputReachable = await input.evaluate(el => {
+        const rect = el.getBoundingClientRect();
+        if (!rect.width || !rect.height) return false;
+        const x = Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2));
+        const y = Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height / 2));
+        const top = document.elementFromPoint(x, y);
+        return !!top && (top === el || el.contains(top) || top.contains(el));
+      }).catch(() => false);
+      if (!inputReachable) {
+        console.log('Ignoring native-language search input because it is covered by an active overlay.');
+        continue;
+      }
+
       console.log('Native-language text input detected.');
       for (const preferredLanguage of ['English', 'Spanish']) {
-        await input.click();
-        await input.fill('');
-        await input.fill(preferredLanguage);
+        const focused = await safeCrawlerClick(input, 'native-language search input');
+        if (!focused) continue;
+        try {
+          await input.fill('');
+          await input.fill(preferredLanguage);
+        } catch {
+          continue;
+        }
         await page.waitForTimeout(500);
-        const candidateIndex = await page.evaluate((wantedLanguage) => {
+
+        const option = await page.evaluate((wantedLanguage) => {
           const wanted = wantedLanguage.toLowerCase();
-          const vh = window.innerHeight;
-          const vw = window.innerWidth;
-          const candidates = Array.from(document.querySelectorAll('body *')).map((el, index) => {
+          const visible = el => {
             const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
+            const style = getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
+              rect.top < window.innerHeight && rect.left < window.innerWidth &&
+              style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0;
+          };
+          const reachable = el => {
+            if (!visible(el)) return false;
+            const rect = el.getBoundingClientRect();
+            const x = Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2));
+            const y = Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height / 2));
+            const top = document.elementFromPoint(x, y);
+            return !!top && (top === el || el.contains(top) || top.contains(el));
+          };
+          const all = Array.from(document.querySelectorAll('body *'));
+          const matches = [];
+          for (const el of all) {
+            if (!visible(el)) continue;
             const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
-            const visible = rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
-              rect.top < vh && rect.left < vw && style.display !== 'none' &&
-              style.visibility !== 'hidden' && Number(style.opacity) > 0;
-            if (!visible || text.toLowerCase() !== wanted) return null;
-            return { index, area: rect.width * rect.height };
-          }).filter(Boolean).sort((a, b) => a.area - b.area);
-          return candidates.length ? candidates[0].index : null;
+            if (text.toLowerCase() !== wanted) continue;
+            const clickable = el.closest('button, [role="option"], [role="menuitem"], [role="button"], a, li, [tabindex]') || el;
+            if (!reachable(clickable)) continue;
+            const rect = clickable.getBoundingClientRect();
+            const dialog = clickable.closest('[role="dialog"], [aria-modal="true"]');
+            matches.push({ el: clickable, area: rect.width * rect.height, inDialog: !!dialog });
+          }
+          if (!matches.length) return null;
+          matches.sort((a, b) => Number(b.inDialog) - Number(a.inDialog) || a.area - b.area);
+          const chosen = matches[0];
+          const id = `native-language-option-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+          chosen.el.setAttribute('data-native-language-option-id', id);
+          return { id };
         }, preferredLanguage);
-        if (candidateIndex === null) continue;
-        const clicked = await page.evaluate(({ wantedLanguage, candidateIndex }) => {
-          const elements = Array.from(document.querySelectorAll('body *'));
-          const el = elements[candidateIndex];
-          if (!el) return false;
-          const rect = el.getBoundingClientRect();
-          const style = window.getComputedStyle(el);
-          const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
-          const visible = rect.width > 0 && rect.height > 0 && style.display !== 'none' &&
-            style.visibility !== 'hidden' && Number(style.opacity) > 0;
-          if (!visible || text.toLowerCase() !== wantedLanguage.toLowerCase()) return false;
-          const clickable = el.closest('button, [role="option"], [role="menuitem"], [role="button"], a, li') || el;
-          clickable.click();
-          return true;
-        }, { wantedLanguage: preferredLanguage, candidateIndex });
+
+        if (!option) continue;
+        const clicked = await safeCrawlerClick(
+          page.locator(`[data-native-language-option-id="${option.id}"]`),
+          `native-language option ${preferredLanguage}`
+        );
         if (!clicked) continue;
         console.log(`Selected preferred native language: ${preferredLanguage}`);
         await page.waitForTimeout(500);
