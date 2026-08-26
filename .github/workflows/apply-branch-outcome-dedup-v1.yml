@@ -1,0 +1,131 @@
+name: Apply branch outcome dedup v1
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/trigger-branch-outcome-dedup-v1.txt'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Patch crawler
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('funnel-crawler-multiscreen.js')
+          s = p.read_text()
+
+          marker = "  function branchProbeIndexes(optionCount, maxProbe = 4) {\n"
+          helper = r'''  function branchOutcomeEquivalent(a, b) {
+    if (!a || !b) return false;
+
+    // Exact screenshot equality is the strongest signal that two branch outcomes
+    // are really the same page, even if the DOM carries answer-specific text/state.
+    if (a.screenshotBuffer && b.screenshotBuffer &&
+        Buffer.isBuffer(a.screenshotBuffer) && Buffer.isBuffer(b.screenshotBuffer) &&
+        a.screenshotBuffer.equals(b.screenshotBuffer)) {
+      return true;
+    }
+
+    const textA = a.fingerprint || normalizeContextText(a.landingState?.pageText || '');
+    const textB = b.fingerprint || normalizeContextText(b.landingState?.pageText || '');
+    if (!textA || !textB) return false;
+
+    const similarity = contextSimilarity(textA, textB);
+    if (similarity >= 0.985) return true;
+
+    // A very high text match with the same numeric claims is usually the same
+    // template/page carrying only tiny answer-specific residue. Do not manufacture
+    // conditional screenshots from that. Numeric/percentage changes remain material.
+    const numericClaims = text => (text.match(/\b\d+(?:[.,]\d+)?%?\b/g) || []).join('|');
+    if (similarity >= 0.955 && numericClaims(textA) === numericClaims(textB)) return true;
+
+    return false;
+  }
+
+  function uniqueBranchOutcomeGroups(outcomes) {
+    const groups = [];
+    for (const outcome of outcomes) {
+      let group = groups.find(item => branchOutcomeEquivalent(item, outcome));
+      if (!group) {
+        group = { ...outcome, answers: [], answerSets: [] };
+        groups.push(group);
+      }
+      if (outcome.optionText) group.answers.push(outcome.optionText);
+      if (outcome.answers) group.answerSets.push(outcome.answers);
+    }
+    return groups;
+  }
+
+'''
+          if 'function branchOutcomeEquivalent(a, b)' not in s:
+              if marker not in s:
+                  raise SystemExit('branchProbeIndexes marker not found')
+              s = s.replace(marker, helper + marker, 1)
+
+          old = "    let probeFingerprints = new Set(outcomes.map(x => x.fingerprint));\n"
+          new = "    let probeFingerprints = new Set(uniqueBranchOutcomeGroups(outcomes).map((_, i) => String(i)));\n"
+          if old in s:
+              s = s.replace(old, new, 1)
+
+          old2 = "      probeFingerprints = new Set(outcomes.map(x => x.fingerprint));\n"
+          new2 = "      probeFingerprints = new Set(uniqueBranchOutcomeGroups(outcomes).map((_, i) => String(i)));\n"
+          if old2 in s:
+              s = s.replace(old2, new2, 1)
+
+          old_block = r'''    const uniqueOutcomes = [];
+    for (const outcome of outcomes) {
+      let existing = uniqueOutcomes.find(item => item.fingerprint === outcome.fingerprint);
+      if (!existing) {
+        existing = { ...outcome, answers: [outcome.optionText] };
+        uniqueOutcomes.push(existing);
+      } else {
+        existing.answers.push(outcome.optionText);
+      }
+    }
+'''
+          new_block = r'''    const uniqueOutcomes = uniqueBranchOutcomeGroups(outcomes);
+'''
+          if old_block in s:
+              s = s.replace(old_block, new_block, 1)
+          else:
+              raise SystemExit('single-select unique outcome block not found')
+
+          old_multi = r'''    const uniqueOutcomes = [];
+    for (const outcome of outcomes) {
+      let existing = uniqueOutcomes.find(item => item.fingerprint === outcome.fingerprint);
+      if (!existing) {
+        existing = { ...outcome, answerSets: [outcome.answers] };
+        uniqueOutcomes.push(existing);
+      } else {
+        existing.answerSets.push(outcome.answers);
+      }
+    }
+'''
+          new_multi = r'''    const uniqueOutcomes = uniqueBranchOutcomeGroups(outcomes);
+'''
+          if old_multi in s:
+              s = s.replace(old_multi, new_multi, 1)
+
+          p.write_text(s)
+          PY
+          node --check funnel-crawler-multiscreen.js
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'No changes to commit.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add funnel-crawler-multiscreen.js
+          git commit -m 'Deduplicate equivalent branch outcomes before confirming branches'
+          git push
