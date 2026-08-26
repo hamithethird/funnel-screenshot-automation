@@ -1,0 +1,185 @@
+from pathlib import Path
+
+p = Path('funnel-crawler-multiscreen.js')
+s = p.read_text()
+
+marker = "  async function exploreAnswerBranches(state, screenNumber) {\n"
+if marker not in s:
+    raise SystemExit('exploreAnswerBranches marker not found')
+
+helper = r'''  async function chooseMultiSelectSetAndAdvance(answerTexts, screenNumber, questionState) {
+    let state = await inspectPageNavigationSafe('multi-select branch inspection');
+    const before = pageSignature(state);
+    const questionUrl = sanitizeUrl(page.url());
+    const selected = [];
+
+    for (const wantedText of answerTexts) {
+      state = await inspectPageNavigationSafe('multi-select option inspection');
+      const uniqueGroup = uniqueAnswerOptions(state.group);
+      const wanted = (wantedText || '').trim().toLowerCase();
+      let option = uniqueGroup.find(x => (x.text || '').trim().toLowerCase() === wanted);
+      if (!option) option = uniqueGroup.find(x => (x.text || '').trim().toLowerCase().includes(wanted));
+      if (!option) return { advanced: false, landingState: state, reason: 'option-missing' };
+
+      const clicked = await safeCrawlerClick(
+        page.locator(`[data-auto-id="${option.id}"]`),
+        option.text || 'multi-select branch answer'
+      );
+      if (!clicked) return { advanced: false, landingState: state, reason: 'click-failed' };
+      selected.push(option.text || wantedText);
+      await page.waitForTimeout(450);
+
+      const afterSelection = await inspectPageNavigationSafe('multi-select post-selection inspection');
+      const originalPrompt = questionPromptFingerprint(questionState);
+      const currentPrompt = questionPromptFingerprint(afterSelection);
+      const samePrompt = !!originalPrompt && !!currentPrompt && contextSimilarity(originalPrompt, currentPrompt) >= 0.86;
+      if (sanitizeUrl(page.url()) !== questionUrl || (!samePrompt && pageSignature(afterSelection) !== before)) {
+        await waitForScreenshotReady();
+        return { advanced: true, landingState: afterSelection, selected };
+      }
+    }
+
+    state = await inspectPageNavigationSafe('multi-select pre-submit inspection');
+    if (state.cta) {
+      const beforeCTA = pageSignature(state);
+      const clicked = await safeCrawlerClick(
+        page.locator(`[data-auto-id="${state.cta.id}"]`),
+        state.cta.text || 'multi-select branch CTA'
+      );
+      if (clicked && await waitForAdvancement(beforeCTA, 12000)) {
+        await waitForScreenshotReady();
+        return {
+          advanced: true,
+          landingState: await inspectPageNavigationSafe('multi-select branch landing'),
+          selected
+        };
+      }
+    }
+
+    const nav = await clickStrongNavigation(state, 'multi-select branch CTA');
+    if (nav.handled && nav.advanced) {
+      await waitForScreenshotReady();
+      return {
+        advanced: true,
+        landingState: await inspectPageNavigationSafe('multi-select branch landing'),
+        selected
+      };
+    }
+
+    return { advanced: false, landingState: state, reason: 'submit-failed', selected };
+  }
+
+  async function exploreMultiSelectBranches(state, screenNumber, instruction) {
+    const uniqueOptions = uniqueAnswerOptions(state.group);
+    const optionTexts = uniqueOptions.map(x => (x.text || '').trim()).filter(Boolean);
+    if (optionTexts.length < 2 || optionTexts.length > 10) return false;
+
+    const minSelections = Math.max(1, Math.min(instruction.minSelections || 1, optionTexts.length));
+    const questionUrl = page.url();
+    const questionFingerprint = questionPromptFingerprint(state);
+    const outcomes = [];
+
+    const testSets = [];
+    if (minSelections === 1) {
+      for (const text of optionTexts) testSets.push([text]);
+    } else {
+      const baseline = optionTexts.slice(0, minSelections);
+      testSets.push(baseline);
+      for (let i = minSelections; i < optionTexts.length; i++) {
+        const variant = baseline.slice();
+        variant[variant.length - 1] = optionTexts[i];
+        testSets.push(variant);
+      }
+    }
+
+    console.log(`Multi-select branch candidate detected. Testing ${testSets.length} bounded selection set(s) for conditional next pages.`);
+
+    for (let setIndex = 0; setIndex < testSets.length; setIndex++) {
+      if (setIndex > 0) {
+        const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
+        if (!restored) {
+          console.log('Multi-select branch question could not be restored. Preserving the current landing page for the next numbered screenshot instead of interacting with it before capture.');
+          return true;
+        }
+      }
+
+      const result = await chooseMultiSelectSetAndAdvance(testSets[setIndex], screenNumber, state);
+      if (!result.advanced || !result.landingState) {
+        console.log(`Could not safely test multi-select set: ${testSets[setIndex].join(' + ')}`);
+        continue;
+      }
+
+      await waitForScreenshotReady({ minimumWaitMs: 1800, maxWaitMs: 5200 });
+      const landingState = await inspectPageNavigationSafe('multi-select branch outcome inspection');
+      const fingerprint = normalizeContextText(landingState.pageText);
+      if (!fingerprint) continue;
+      const screenshotBuffer = await screenshotBufferNavigationSafe('multi-select branch outcome screenshot');
+      outcomes.push({ answers: testSets[setIndex], fingerprint, screenshotBuffer, landingState });
+      console.log(`Recorded multi-select next-page outcome for: ${testSets[setIndex].join(' + ')}`);
+    }
+
+    if (outcomes.length < 2) {
+      if (outcomes.length === 1) {
+        console.log('Only one multi-select outcome could be recorded. Keeping that landing page untouched so it will be captured as the next numbered screenshot.');
+        return true;
+      }
+      return false;
+    }
+
+    const uniqueOutcomes = [];
+    for (const outcome of outcomes) {
+      let existing = uniqueOutcomes.find(item => item.fingerprint === outcome.fingerprint);
+      if (!existing) {
+        existing = { ...outcome, answerSets: [outcome.answers] };
+        uniqueOutcomes.push(existing);
+      } else {
+        existing.answerSets.push(outcome.answers);
+      }
+    }
+
+    if (uniqueOutcomes.length > 1) {
+      console.log(`Conditional multi-select branching confirmed: ${uniqueOutcomes.length} unique next pages found.`);
+      for (let i = 0; i < uniqueOutcomes.length; i++) {
+        const filename = path.join(OUTPUT_DIR, `${String(screenNumber).padStart(2, '0')}${branchLetter(i)}.png`);
+        fs.writeFileSync(filename, uniqueOutcomes[i].screenshotBuffer);
+        console.log(`Captured ${path.basename(filename)} for selection set(s): ${uniqueOutcomes[i].answerSets.map(set => set.join(' + ')).join(' | ')}`);
+      }
+    } else {
+      console.log('All tested multi-select selection sets led to the same immediate next page.');
+    }
+
+    const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
+    if (!restored) {
+      console.log('Could not restore the multi-select source question after comparison. Preserving the current landing page for the next numbered screenshot.');
+      return true;
+    }
+
+    const finalResult = await chooseMultiSelectSetAndAdvance(testSets[0], screenNumber, state);
+    if (!finalResult.advanced || !finalResult.landingState) return false;
+    if (uniqueOutcomes.length > 1) {
+      const mainFingerprint = normalizeContextText(finalResult.landingState.pageText);
+      if (uniqueOutcomes.some(item => item.fingerprint === mainFingerprint)) {
+        skipNextNumberedFingerprint = mainFingerprint;
+        console.log('Main path is on a multi-select transition already captured as a lettered screenshot; the duplicate numbered transition will be skipped.');
+      }
+    }
+    return true;
+  }
+
+'''
+
+s = s.replace(marker, helper + marker, 1)
+
+old = """    if (state.group.length < 2 || state.group.length > 10) return false;\n    if (instruction.minSelections !== 1 || instruction.maxSelections !== 1) return false;\n\n    const optionTexts = state.group.map(x => (x.text || '').trim()).filter(Boolean);\n"""
+new = """    if (state.group.length < 2 || state.group.length > 10) return false;\n\n    // Multi-select questions can also drive conditional transitions.\n    if (instruction.minSelections !== 1 || instruction.maxSelections !== 1) {\n      return await exploreMultiSelectBranches(state, screenNumber, instruction);\n    }\n\n    const optionTexts = uniqueAnswerOptions(state.group).map(x => (x.text || '').trim()).filter(Boolean);\n"""
+if old not in s:
+    raise SystemExit('single-select branch gate block not found')
+s = s.replace(old, new, 1)
+
+old = """    if (outcomes.length < 2) {\n      console.log('Too few branch outcomes were successfully tested. Restoring the question and continuing on the normal first-answer path.');\n      const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);\n      if (!restored) return false;\n      const finalResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);\n      return finalResult.advanced;\n    }\n"""
+new = """    if (outcomes.length < 2) {\n      console.log('Too few branch outcomes were successfully tested. Restoring the question and continuing on the normal first-answer path.');\n      const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);\n      if (!restored) {\n        console.log('Branch source could not be restored. Preserving the current landing page for the next numbered screenshot.');\n        return outcomes.length > 0;\n      }\n      const finalResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);\n      return finalResult.advanced;\n    }\n"""
+if old not in s:
+    raise SystemExit('too-few outcomes block not found')
+s = s.replace(old, new, 1)
+
+p.write_text(s)
