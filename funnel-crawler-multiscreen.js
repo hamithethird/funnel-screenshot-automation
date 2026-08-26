@@ -829,7 +829,29 @@ function sanitizeUrl(rawUrl) {
       const hasPricingLanguage = pricingPattern.test(bodyText);
       const hasPurchaseLanguage = purchasePattern.test(bodyText);
       const hasMultiplePrices = current.length >= 2;
-      const hasPlanPricingPaywall = hasPlanReadyLanguage && hasPricingLanguage && (current.length >= 1 || hasPurchaseLanguage);
+
+      // Email-delivery gates often say things like "Your plan is ready to send",
+      // "weekly progress reports", and "GET MY PLAN". Those phrases used to
+      // satisfy the broad plan-ready + pricing heuristic even though the user still
+      // has to enter an email before the real pricing/paywall screen appears.
+      // A visible editable email field therefore suppresses the weak paywall rule
+      // unless genuine price/currency evidence is already present.
+      const visibleEmailField = Array.from(document.querySelectorAll('input, textarea')).some(el => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        const visible = rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 &&
+          style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0;
+        if (!visible || el.disabled) return false;
+        const signals = [
+          el.getAttribute('type'), el.getAttribute('name'), el.getAttribute('placeholder'),
+          el.getAttribute('autocomplete'), el.getAttribute('aria-label')
+        ].filter(Boolean).join(' ').toLowerCase();
+        return el.getAttribute('type') === 'email' || /\be-?mail\b/.test(signals);
+      });
+      const hasRealPriceEvidence = current.length >= 1 || crossed.length >= 1;
+      const hasPlanPricingPaywall = hasPlanReadyLanguage && hasPricingLanguage &&
+        (hasRealPriceEvidence || hasPurchaseLanguage) &&
+        !(visibleEmailField && !hasRealPriceEvidence);
       const hasStrongPricingPaywall = hasPricingLanguage && hasMultiplePrices && (hasPurchaseLanguage || longPage);
       const discountPaywall = hasDiscountPair && !pairOnlyInModal && longPage;
       const isPagePaywall = discountPaywall || hasPlanPricingPaywall || hasStrongPricingPaywall;
@@ -3444,6 +3466,34 @@ function sanitizeUrl(rawUrl) {
     return await advanceOneScreen(delayedResult.state, screenNumber);
   }
 
+  async function captureHighResolutionFullPage(filename, scaleFactor = 2) {
+    // Keep the CSS viewport/layout unchanged while increasing only the physical
+    // screenshot pixel density. This produces a sharper paywall PNG for Figma
+    // without switching the site into a desktop/responsive breakpoint.
+    const viewport = page.viewportSize() || { width: 390, height: 844 };
+    let cdp = null;
+    try {
+      cdp = await page.context().newCDPSession(page);
+      await cdp.send('Emulation.setDeviceMetricsOverride', {
+        width: viewport.width,
+        height: viewport.height,
+        deviceScaleFactor: scaleFactor,
+        mobile: false,
+        screenWidth: viewport.width,
+        screenHeight: viewport.height
+      });
+      await prepareFullPageCapture();
+      await page.screenshot({ path: filename, fullPage: true, scale: 'device' });
+      console.log(`Re-captured paywall at ${scaleFactor}x device resolution for Figma readability: ${filename}`);
+      return true;
+    } catch (error) {
+      console.log('High-resolution paywall capture failed; keeping the normal full-page PNG:', error?.message || error);
+      return false;
+    } finally {
+      if (cdp) await cdp.send('Emulation.clearDeviceMetricsOverride').catch(() => {});
+    }
+  }
+
   const MAX_SCREENS = 100;
   for (let screenNumber = 1; screenNumber <= MAX_SCREENS; screenNumber++) {
     await waitForVisualSettle();
@@ -3485,7 +3535,11 @@ function sanitizeUrl(rawUrl) {
       console.log('Paywall detected:', paywallState.reason || 'pricing/paywall evidence');
       if (paywallState.crossedPrices.length) console.log('Crossed prices:', paywallState.crossedPrices);
       if (paywallState.currentPrices.length) console.log('Current prices:', paywallState.currentPrices);
-      console.log(`Captured paywall as full-page PNG: ${filename}`);
+      // The ordinary numbered screenshot above establishes the exact page and file
+      // name. Overwrite only genuine paywalls with a denser 2x capture so long
+      // pages remain readable when enlarged in Figma.
+      await captureHighResolutionFullPage(filename, 2);
+      console.log(`Captured paywall as high-resolution full-page PNG: ${filename}`);
       console.log('Stopping immediately after paywall capture; no paywall CTA will be clicked.');
       break;
     }
