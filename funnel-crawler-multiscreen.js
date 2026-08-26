@@ -440,6 +440,7 @@ function sanitizeUrl(rawUrl) {
   const supplementalCounterByScreen = new Map();
   const supplementalFingerprintsByScreen = new Map();
   let skipNextNumberedFingerprint = null;
+  let currentNumberedCaptureSignature = null;
 
   function nextSupplementalFilename(screenNumber) {
     const current = supplementalCounterByScreen.get(screenNumber) || 0;
@@ -586,6 +587,12 @@ function sanitizeUrl(rawUrl) {
 
     const beforeState = state || await inspectPage();
     const beforeSignature = pageSignature(beforeState);
+
+    if (currentNumberedCaptureSignature && beforeSignature !== currentNumberedCaptureSignature) {
+      console.log('Scratch/reveal page appeared after the current numbered screenshot. Deferring interaction so its closed state is captured on the next numbered screen.');
+      return { handled: true, advanced: true };
+    }
+
     const target = page.locator(`[data-crawler-scratch-id="${probe.id}"]`);
     const box = await target.boundingBox().catch(() => null);
     if (!box) return { handled: true, advanced: false };
@@ -613,12 +620,23 @@ function sanitizeUrl(rawUrl) {
     }
 
     await page.waitForTimeout(900);
+    await page.evaluate(() => {
+      const selection = window.getSelection?.();
+      if (selection) selection.removeAllRanges();
+      const active = document.activeElement;
+      if (active && typeof active.blur === 'function') active.blur();
+    }).catch(() => {});
+    await page.waitForTimeout(120);
     await waitForScreenshotReady({ minimumWaitMs: 700, maxWaitMs: 2600, pollMs: 250 });
     const afterState = await inspectPage();
     const changed = pageSignature(afterState) !== beforeSignature;
 
     if (screenNumber !== null && changed) {
-      await captureSupplementalState(screenNumber, afterState, 'scratch/reveal completed', [], 0.99);
+      const revealFilename = path.join(OUTPUT_DIR, `${String(screenNumber).padStart(2, '0')}b.png`);
+      await page.screenshot({ path: revealFilename, fullPage: true });
+      console.log(`Captured scratch/reveal completed: ${revealFilename}`);
+      // Reserve a/b in the supplemental counter so later variants continue at c.
+      supplementalCounterByScreen.set(screenNumber, Math.max(supplementalCounterByScreen.get(screenNumber) || 0, 2));
     }
 
     const navigationResult = await clickStrongNavigation(afterState, 'post-scratch navigation CTA');
@@ -3289,6 +3307,7 @@ function sanitizeUrl(rawUrl) {
     await prepareFullPageCapture();
     await page.screenshot({ path: filename, fullPage: true });
     registerBaseScreenshot(screenNumber, filename);
+    currentNumberedCaptureSignature = pageSignature(state);
     console.log(`\nCaptured ${filename}`);
     console.log({
       url: sanitizeUrl(page.url()),
