@@ -1,0 +1,33 @@
+name: Apply profile numeric input fix
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-profile-numeric-inputs-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Patch and syntax-check crawler
+        run: |
+          python apply_profile_numeric_inputs_fix.py
+          node --check funnel-crawler-multiscreen.js
+      - name: Commit crawler change
+        run: |
+          if git diff --quiet -- funnel-crawler-multiscreen.js; then
+            echo "No crawler changes needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add funnel-crawler-multiscreen.js
+          git commit -m "Handle height weight goal weight and age inputs"
+          git push origin HEAD:main
