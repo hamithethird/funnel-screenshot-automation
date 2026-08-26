@@ -3213,7 +3213,7 @@ function sanitizeUrl(rawUrl) {
     }
 
     console.log(`Conditional branching confirmed: ${probeFingerprints.size} different immediate next pages found.`);
-    console.log('Branching is confirmed, so the crawler will now test every remaining unresolved answer to collect all unique transition pages.');
+    console.log('Branching is confirmed, so the crawler will now test every remaining unresolved answer to classify unique next-page variants.');
 
     const alreadyTested = new Set(outcomes.map(x => x.index));
     for (let index = 0; index < optionTexts.length; index++) {
@@ -3239,11 +3239,37 @@ function sanitizeUrl(rawUrl) {
       return finalResult.advanced;
     }
 
-    console.log(`Saving ${uniqueOutcomes.length} unique conditional next pages as lettered screenshots.`);
-    for (let i = 0; i < uniqueOutcomes.length; i++) {
-      const filename = path.join(OUTPUT_DIR, `${String(screenNumber).padStart(2, '0')}${branchLetter(i)}.png`);
-      fs.writeFileSync(filename, uniqueOutcomes[i].screenshotBuffer);
-      console.log(`Captured ${path.basename(filename)} for answer(s): ${uniqueOutcomes[i].answers.join(' | ')}`);
+    // Distinguish a true transition page from a conditional NEXT QUESTION.
+    // A landing page that already contains another answer group is not a passive
+    // transition. Previously we saved those as source-page letters (07a, 07b...)
+    // and then tried to auto-advance them as if they were transitions, which can
+    // juxtapose two consecutive question steps and stop the crawl.
+    const conditionalQuestionOutcomes = uniqueOutcomes.filter(item => (item.landingState?.group?.length || 0) >= 2);
+    const conditionalTransitionOutcomes = uniqueOutcomes.filter(item => (item.landingState?.group?.length || 0) < 2);
+
+    if (conditionalTransitionOutcomes.length > 0) {
+      console.log(`Saving ${conditionalTransitionOutcomes.length} genuine conditional transition page(s) as source-page lettered screenshots.`);
+      for (let i = 0; i < conditionalTransitionOutcomes.length; i++) {
+        const filename = nextFreeLetteredFilename(screenNumber);
+        if (!filename) continue;
+        fs.writeFileSync(filename, conditionalTransitionOutcomes[i].screenshotBuffer);
+        console.log(`Captured ${path.basename(filename)} transition for answer(s): ${conditionalTransitionOutcomes[i].answers.join(' | ')}`);
+      }
+    }
+
+    if (conditionalQuestionOutcomes.length > 1) {
+      // The first normal path will become the next numbered screenshot (for example
+      // 08.png). Save only the ALTERNATE next-question variants as 08a, 08b, ...
+      // rather than incorrectly attaching them to the source question as 07a, 07b.
+      const canonicalQuestionOutcome = conditionalQuestionOutcomes.find(item => item.answers.includes(optionTexts[0])) || conditionalQuestionOutcomes[0];
+      const alternateQuestionOutcomes = conditionalQuestionOutcomes.filter(item => item !== canonicalQuestionOutcome);
+      console.log(`Conditional next-question variants detected: ${conditionalQuestionOutcomes.length}. The main path will be ${String(screenNumber + 1).padStart(2, '0')}.png; saving ${alternateQuestionOutcomes.length} alternate variant(s) beside it.`);
+      for (const outcome of alternateQuestionOutcomes) {
+        const filename = nextFreeLetteredFilename(screenNumber + 1);
+        if (!filename) continue;
+        fs.writeFileSync(filename, outcome.screenshotBuffer);
+        console.log(`Captured ${path.basename(filename)} conditional next-question variant for answer(s): ${outcome.answers.join(' | ')}`);
+      }
     }
 
     const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
@@ -3255,9 +3281,14 @@ function sanitizeUrl(rawUrl) {
     const finalResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);
     if (!finalResult.advanced || !finalResult.landingState) return false;
     const mainFingerprint = normalizeContextText(finalResult.landingState.pageText);
-    if (uniqueOutcomes.some(item => item.fingerprint === mainFingerprint)) {
+    // Skip the next numbered page ONLY when it is a genuine transition that was
+    // already saved under the source screen. Never skip a conditional question:
+    // it must become the next numbered screenshot and remain actionable.
+    if (conditionalTransitionOutcomes.some(item => item.fingerprint === mainFingerprint)) {
       skipNextNumberedFingerprint = mainFingerprint;
-      console.log('Main path is currently on a transition already captured as a lettered screenshot; the next numbered capture will skip over it.');
+      console.log('Main path is currently on a genuine transition already captured as a source-page lettered screenshot; the duplicate numbered transition will be skipped.');
+    } else if ((finalResult.landingState?.group?.length || 0) >= 2) {
+      console.log('Main path landed on another question, not a transition. It will be captured normally as the next numbered screen.');
     }
     return true;
   }
