@@ -43,36 +43,16 @@ end_marker = '''    if (probeFingerprints.size <= 1 && unresolvedIndexes.length 
 start = s.find(start_marker)
 end = s.find(end_marker, start if start >= 0 else 0)
 if start >= 0 and end >= 0:
-    replacement = '''    // A bounded four-answer probe is the decision stage. If all sampled answers
-    // produce the same immediate next page, do not spend time testing every remaining
-    // answer merely to prove sameness. Untested answers stay unresolved and the crawler
-    // continues on the normal path. If the sample proves branching, the existing logic
-    // below may still test remaining answers to collect the distinct conditional pages.
-    let testedIndexes = new Set(outcomes.map(x => x.index));
-    let unresolvedIndexes = probedIndexes.filter(index => !testedIndexes.has(index));
+    replacement = '''    // The four-answer sample is the decision stage. If all sampled answers lead to
+    // the same immediate next page, do not test every unprobed answer just to prove
+    // sameness. Untested answers remain unresolved and the normal path continues.
+    // If the sample proves branching, the existing branch-confirmed path below can
+    // still test remaining answers to collect distinct conditional pages.
 
 '''
     s = s[:start] + replacement + s[end:]
-elif 'A bounded four-answer probe is the decision stage.' not in s:
+elif 'The four-answer sample is the decision stage.' not in s:
     raise SystemExit('exhaustive untested-answer block markers missing')
-
-# The old code declares testedIndexes/unresolvedIndexes immediately before the removed
-# exhaustive block. Remove the duplicate declarations if they remain adjacent.
-dup = '''    let testedIndexes = new Set(outcomes.map(x => x.index));
-    let unresolvedIndexes = probedIndexes.filter(index => !testedIndexes.has(index));
-
-    // A bounded four-answer probe is the decision stage.
-'''
-if dup in s:
-    s = s.replace(dup, '''    // A bounded four-answer probe is the decision stage.
-''', 1)
-    needle = '''    // continues on the normal path. If the sample proves branching, the existing logic
-    // below may still test remaining answers to collect the distinct conditional pages.
-'''
-    s = s.replace(needle, needle + '''    let testedIndexes = new Set(outcomes.map(x => x.index));
-    let unresolvedIndexes = probedIndexes.filter(index => !testedIndexes.has(index));
-
-''', 1)
 
 old_log = '    console.log(`Probing up to ${probedIndexes.length} strategically spread answers to determine whether this question has conditional next pages.`);'
 new_log = '    console.log(`Randomly probing up to ${probedIndexes.length} answers to determine whether this question has conditional next pages.`);'
