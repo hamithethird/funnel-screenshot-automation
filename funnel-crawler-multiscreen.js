@@ -1312,6 +1312,28 @@ function sanitizeUrl(rawUrl) {
     return await waitForAdvancement(beforeSignature, 5000);
   }
 
+  function isTransientPostSelectionShell(state) {
+    if (!state) return true;
+    const text = normalizeContextText(state.pageText || '');
+    const hasMeaningfulText = text.length >= 35;
+    const hasChoices = Array.isArray(state.group) && state.group.length > 0;
+    const hasCTA = !!state.cta;
+    return !hasMeaningfulText && !hasChoices && !hasCTA;
+  }
+
+  async function waitForPostSelectionSettle(label = 'post-selection state', minimumWaitMs = 2600, timeoutMs = 7000) {
+    await page.waitForTimeout(minimumWaitMs);
+    const startedAt = Date.now();
+    let state = await inspectPageNavigationSafe(label);
+    while (Date.now() - startedAt < timeoutMs && isTransientPostSelectionShell(state)) {
+      console.log('Transient post-selection shell detected. Waiting for the real screen to mount.');
+      await page.waitForTimeout(450);
+      await silenceMedia();
+      state = await inspectPageNavigationSafe(label);
+    }
+    return state;
+  }
+
   async function handleAnswerGroup(state, screenNumber = null) {
     const initialSignature = pageSignature(state);
     const initialState = state;
@@ -1361,21 +1383,22 @@ function sanitizeUrl(rawUrl) {
       const clicked = await safeCrawlerClick(page.locator(`[data-auto-id="${option.id}"]`), option.text || 'answer option');
       if (!clicked) return false;
       selectedKeys.add(optionKey);
-      await page.waitForTimeout(650);
 
-      let afterSelection = await inspectPageNavigationSafe('answer selection inspection');
+      // Give SPAs time to finish unmounting/mounting after a selection. A brief
+      // blank shell is a transition between screens, not a meaningful visual state.
+      let afterSelection = await waitForPostSelectionSettle('answer selection inspection', 2600, 7000);
       const samePageSelectionState = sanitizeUrl(page.url()) === initialUrl && afterSelection.group.length > 0;
       const contextChanged = normalizeContextText(afterSelection.pageText) !== normalizeContextText(initialState.pageText);
       const originalPrompt = questionPromptFingerprint(initialState);
       const currentPrompt = questionPromptFingerprint(afterSelection);
       const promptStillMatches = !!originalPrompt && !!currentPrompt && contextSimilarity(originalPrompt, currentPrompt) >= 0.86;
-      if (samePageSelectionState && promptStillMatches) {
-        await captureSamePageVisualVariant(screenNumber, `selection: ${option.text || '[no visible text]'}`);
-      }
       const originalOptions = (initialState.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
       const currentOptions = (afterSelection.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
       const overlap = originalOptions.filter(text => currentOptions.includes(text)).length;
       const sameAnswerSet = overlap >= Math.max(1, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.6));
+      if (samePageSelectionState && promptStillMatches && sameAnswerSet && !isTransientPostSelectionShell(afterSelection)) {
+        await captureSamePageVisualVariant(screenNumber, `selection: ${option.text || '[no visible text]'}`);
+      }
 
       // A lettered screenshot here is reserved for a genuine same-question
       // post-selection message/popup. A normal next question on the same URL must
@@ -2669,13 +2692,16 @@ function sanitizeUrl(rawUrl) {
       );
       if (!clicked) return { advanced: false, landingState: state, reason: 'click-failed' };
       selected.push(option.text || wantedText);
-      await page.waitForTimeout(450);
 
-      const afterSelection = await inspectPageNavigationSafe('multi-select post-selection inspection');
+      const afterSelection = await waitForPostSelectionSettle('multi-select post-selection inspection', 2600, 7000);
       const originalPrompt = questionPromptFingerprint(questionState);
       const currentPrompt = questionPromptFingerprint(afterSelection);
       const samePrompt = !!originalPrompt && !!currentPrompt && contextSimilarity(originalPrompt, currentPrompt) >= 0.86;
-      if (sanitizeUrl(page.url()) === questionUrl && samePrompt) {
+      const originalOptions = (questionState.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+      const currentOptions = (afterSelection.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+      const overlap = originalOptions.filter(text => currentOptions.includes(text)).length;
+      const sameAnswerSet = overlap >= Math.max(1, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.6));
+      if (sanitizeUrl(page.url()) === questionUrl && samePrompt && sameAnswerSet && !isTransientPostSelectionShell(afterSelection)) {
         await captureSamePageVisualVariant(screenNumber, `selection: ${selected.join(' + ')}`);
       }
       if (sanitizeUrl(page.url()) !== questionUrl || (!samePrompt && pageSignature(afterSelection) !== before)) {
