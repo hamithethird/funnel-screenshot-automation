@@ -1,0 +1,41 @@
+name: Apply navigation readiness fix
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Patch crawler startup navigation
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('funnel-crawler-multiscreen.js')
+          s = p.read_text()
+          old = "  await page.goto(url, { waitUntil: 'networkidle' });\n"
+          new = '''  // Do not require networkidle here. Modern funnels often keep analytics,\n  // tracking, streaming, or API connections alive indefinitely, which makes\n  // networkidle an unreliable startup condition and can kill an otherwise\n  // fully rendered crawl before screen 1.\n  try {\n    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });\n  } catch (error) {\n    // If navigation already committed and the page is no longer blank, keep\n    // going and let the crawler's own actionable/visual-settle logic decide\n    // readiness. Only fail hard when nothing useful loaded at all.\n    if (page.url() === 'about:blank') throw error;\n    console.log('Initial navigation did not fully settle, but the page committed. Continuing with crawler readiness checks.');\n  }\n  await page.waitForTimeout(1500);\n'''
+          if old not in s:
+              if "waitUntil: 'domcontentloaded', timeout: 45000" in s:
+                  raise SystemExit(0)
+              raise SystemExit('startup networkidle navigation marker not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          node --check funnel-crawler-multiscreen.js
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add funnel-crawler-multiscreen.js
+          git commit -m 'Avoid networkidle startup timeouts'
+          git push
