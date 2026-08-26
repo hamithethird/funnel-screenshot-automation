@@ -72,3 +72,5 @@ jobs:
           git add funnel-crawler-multiscreen.js
           git commit -m "Wait for stable screen after selections" || exit 0
           git push origin main
+
+# retrigger 2026-08-26
