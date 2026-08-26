@@ -1,1 +1,1 @@
-trigger v3
+trigger v3 state reset 2026-08-26T12:38Z
