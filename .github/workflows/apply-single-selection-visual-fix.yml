@@ -1,0 +1,50 @@
+name: Apply single selection visual fix
+
+on:
+  push:
+    paths:
+      - '.github/single-selection-visual-fix-trigger.txt'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Patch crawler and syntax check
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('funnel-crawler-multiscreen.js')
+          s = p.read_text()
+
+          old = "    const selectedKeys = new Set();\n\n    console.log('Selection instruction detected:', {"
+          new = "    const selectedKeys = new Set();\n    // A multi-select page may visually react after every checked answer. We only\n    // need one screenshot proving that selected-state UI exists; subsequent\n    // selections are interaction state, not separate funnel screens.\n    let capturedSelectionVisual = false;\n\n    console.log('Selection instruction detected:', {"
+          if 'let capturedSelectionVisual = false;' not in s:
+            if old not in s:
+              raise SystemExit('selectedKeys marker missing')
+            s = s.replace(old, new, 1)
+
+          old = "      if (samePageSelectionState && promptStillMatches && sameAnswerSet && !isTransientPostSelectionShell(afterSelection)) {\n        await captureSamePageVisualVariant(screenNumber, `selection: ${option.text || '[no visible text]'}`);\n      }"
+          new = "      if (samePageSelectionState && promptStillMatches && sameAnswerSet && !isTransientPostSelectionShell(afterSelection) && !capturedSelectionVisual) {\n        const captured = await captureSamePageVisualVariant(screenNumber, `selection: ${option.text || '[no visible text]'}`);\n        // Whether captureSamePageVisualVariant writes a file or deduplicates the\n        // state, do not manufacture more screenshots merely because more boxes\n        // are checked on this same question.\n        capturedSelectionVisual = true;\n      }"
+          if '&& !capturedSelectionVisual)' not in s:
+            if old not in s:
+              raise SystemExit('same-page visual capture marker missing')
+            s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+          node --check funnel-crawler-multiscreen.js
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add funnel-crawler-multiscreen.js
+          if git diff --cached --quiet; then
+            echo "No crawler changes needed"
+          else
+            git commit -m "Capture only one selected-state visual per question"
+            git push origin main
+          fi
