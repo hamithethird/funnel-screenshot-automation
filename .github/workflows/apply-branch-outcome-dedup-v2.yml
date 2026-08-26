@@ -1,0 +1,62 @@
+name: Apply branch outcome dedup v2
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Patch crawler
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('funnel-crawler-multiscreen.js')
+          s = p.read_text()
+
+          marker = "  function branchProbeIndexes(optionCount, maxProbe = 4) {\n"
+          if marker not in s:
+              raise SystemExit('branchProbeIndexes marker not found')
+
+          if 'function branchOutcomeEquivalent(a, b)' not in s:
+              helper = '''  function branchOutcomeEquivalent(a, b) {\n    if (!a || !b) return false;\n\n    if (a.screenshotBuffer && b.screenshotBuffer &&\n        Buffer.isBuffer(a.screenshotBuffer) && Buffer.isBuffer(b.screenshotBuffer) &&\n        a.screenshotBuffer.equals(b.screenshotBuffer)) {\n      return true;\n    }\n\n    const textA = a.fingerprint || normalizeContextText(a.landingState?.pageText || '');\n    const textB = b.fingerprint || normalizeContextText(b.landingState?.pageText || '');\n    if (!textA || !textB) return false;\n\n    const similarity = contextSimilarity(textA, textB);\n    if (similarity >= 0.985) return true;\n\n    const numericClaims = text => (text.match(/\\b\\d+(?:[.,]\\d+)?%?\\b/g) || []).join('|');\n    if (similarity >= 0.955 && numericClaims(textA) === numericClaims(textB)) return true;\n\n    return false;\n  }\n\n  function uniqueBranchOutcomeGroups(outcomes) {\n    const groups = [];\n    for (const outcome of outcomes) {\n      let group = groups.find(item => branchOutcomeEquivalent(item, outcome));\n      if (!group) {\n        group = { ...outcome, answers: [], answerSets: [] };\n        groups.push(group);\n      }\n      if (outcome.optionText) group.answers.push(outcome.optionText);\n      if (outcome.answers) group.answerSets.push(outcome.answers);\n    }\n    return groups;\n  }\n\n'''
+              s = s.replace(marker, helper + marker, 1)
+
+          s = s.replace(
+              "    let probeFingerprints = new Set(outcomes.map(x => x.fingerprint));\n",
+              "    let probeFingerprints = new Set(uniqueBranchOutcomeGroups(outcomes).map((_, i) => String(i)));\n",
+              1
+          )
+          s = s.replace(
+              "      probeFingerprints = new Set(outcomes.map(x => x.fingerprint));\n",
+              "      probeFingerprints = new Set(uniqueBranchOutcomeGroups(outcomes).map((_, i) => String(i)));\n",
+              1
+          )
+
+          old_single = '''    const uniqueOutcomes = [];\n    for (const outcome of outcomes) {\n      let existing = uniqueOutcomes.find(item => item.fingerprint === outcome.fingerprint);\n      if (!existing) {\n        existing = { ...outcome, answers: [outcome.optionText] };\n        uniqueOutcomes.push(existing);\n      } else {\n        existing.answers.push(outcome.optionText);\n      }\n    }\n'''
+          if old_single in s:
+              s = s.replace(old_single, "    const uniqueOutcomes = uniqueBranchOutcomeGroups(outcomes);\n", 1)
+
+          old_multi = '''    const uniqueOutcomes = [];\n    for (const outcome of outcomes) {\n      let existing = uniqueOutcomes.find(item => item.fingerprint === outcome.fingerprint);\n      if (!existing) {\n        existing = { ...outcome, answerSets: [outcome.answers] };\n        uniqueOutcomes.push(existing);\n      } else {\n        existing.answerSets.push(outcome.answers);\n      }\n    }\n'''
+          if old_multi in s:
+              s = s.replace(old_multi, "    const uniqueOutcomes = uniqueBranchOutcomeGroups(outcomes);\n", 1)
+
+          p.write_text(s)
+          PY
+          node --check funnel-crawler-multiscreen.js
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add funnel-crawler-multiscreen.js
+          git commit -m 'Deduplicate equivalent branch outcomes before confirming branches'
+          git push
