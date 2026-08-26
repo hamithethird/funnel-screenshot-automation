@@ -92,7 +92,10 @@ function isPassiveTransitionScreen(text) {
     /\b(crafting|creating|generating|building|preparing|personalizing|personalising|analyzing|analysing|processing|loading|calculating|finalizing|finalising|matching|assessing|evaluating|scoring|tailoring|compiling)\b/,
     /\b(putting together|setting up)\b/,
     /\bplease wait\b/,
-    /\balmost (?:done|ready|there)\b/,
+    // "Almost there" is commonly a section/header label on active forms
+    // (for example BetterMe height/weight/name steps). It must not by itself
+    // classify a page as passive. Only the stronger completion phrases remain.
+    /\balmost (?:done|ready)\b/,
     /\bhang tight\b/,
     /\bthis may take (?:a|few|some) (?:moment|moments|second|seconds|minute|minutes)\b/
   ];
@@ -1303,7 +1306,11 @@ function sanitizeUrl(rawUrl) {
     const initialState = await inspectPage();
     const initialSignature = pageSignature(initialState);
     const initialUrl = sanitizeUrl(page.url());
-    const passiveTransition = isPassiveTransitionScreen(initialState.pageText);
+    // A page with a visible editable field is an ACTIVE FORM, never a passive
+    // transition. This precedence is intentional: form intent outranks copy like
+    // "Almost There", "preparing", or other generic shell text.
+    const initialEditableInput = await hasVisibleEditableInput();
+    const passiveTransition = !initialEditableInput && isPassiveTransitionScreen(initialState.pageText);
     const effectiveTimeoutMs = passiveTransition ? Math.max(timeoutMs, 60000) : timeoutMs;
 
     if (passiveTransition) {
