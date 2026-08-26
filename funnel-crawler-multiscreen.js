@@ -420,7 +420,7 @@ function sanitizeUrl(rawUrl) {
     return result;
   }
 
-  const RUN_EMAIL = `${generateRandomAsciiString(16)}@gmail.com`;
+  const RUN_EMAIL = 'REMOVED_EMAIL';
 
   function generateRunPassword(length = 16) {
     const lowercase = 'abcdefghijklmnopqrstuvwxyz';
@@ -2697,11 +2697,12 @@ function sanitizeUrl(rawUrl) {
   }
 
   function branchProbeIndexes(optionCount, maxProbe = 4) {
-    if (optionCount <= maxProbe) return Array.from({ length: optionCount }, (_, i) => i);
-    const raw = [0, optionCount - 1, Math.round((optionCount - 1) / 3), Math.round(((optionCount - 1) * 2) / 3)];
-    const unique = [];
-    for (const index of raw) if (!unique.includes(index)) unique.push(index);
-    return unique.slice(0, maxProbe);
+    const indexes = Array.from({ length: optionCount }, (_, i) => i);
+    for (let i = indexes.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [indexes[i], indexes[j]] = [indexes[j], indexes[i]];
+    }
+    return indexes.slice(0, Math.min(maxProbe, optionCount));
   }
 
   async function chooseMultiSelectSetAndAdvance(answerTexts, screenNumber, questionState) {
@@ -2983,7 +2984,7 @@ function sanitizeUrl(rawUrl) {
     const questionFingerprint = questionPromptFingerprint(questionState);
     const outcomes = [];
     const probedIndexes = branchProbeIndexes(optionTexts.length, 4);
-    console.log(`Probing up to ${probedIndexes.length} strategically spread answers to determine whether this question has conditional next pages.`);
+    console.log(`Randomly probing up to ${probedIndexes.length} answers to determine whether this question has conditional next pages.`);
 
     const recordOutcomeForIndex = async (index) => {
       if (outcomes.length > 0) {
@@ -3044,29 +3045,11 @@ function sanitizeUrl(rawUrl) {
     let testedIndexes = new Set(outcomes.map(x => x.index));
     let unresolvedIndexes = probedIndexes.filter(index => !testedIndexes.has(index));
 
-    // IMPORTANT: the crawler's goal is to find ALL unique funnel pages. A 4-answer
-    // probe is only an optimization for finding evidence of branching quickly; it
-    // must never be treated as proof that untested answers are identical. If the
-    // initial probe found only one outcome and the question has additional answers,
-    // test those remaining answers before declaring "no conditional branch".
-    const untestedIndexes = [];
-    for (let index = 0; index < optionTexts.length; index++) {
-      if (!testedIndexes.has(index)) untestedIndexes.push(index);
-    }
-
-    if (probeFingerprints.size <= 1 && untestedIndexes.length > 0) {
-      console.log(`Initial branch probe found one outcome, but ${untestedIndexes.length} answer(s) remain untested. Testing them before ruling out conditional transitions.`);
-      for (const index of untestedIndexes) {
-        const recorded = await recordOutcomeForIndex(index);
-        if (!recorded.ok) {
-          console.log(`Could not safely test unprobed branch answer "${optionTexts[index]}". Leaving this answer unresolved instead of assuming it matches.`);
-          continue;
-        }
-        testedIndexes.add(index);
-      }
-      probeFingerprints = new Set(outcomes.map(x => x.fingerprint));
-      unresolvedIndexes = Array.from({ length: optionTexts.length }, (_, i) => i).filter(index => !testedIndexes.has(index));
-    }
+    // The four-answer sample is the decision stage. If all sampled answers lead to
+    // the same immediate next page, do not test every unprobed answer just to prove
+    // sameness. Untested answers remain unresolved and the normal path continues.
+    // If the sample proves branching, the existing branch-confirmed path below can
+    // still test remaining answers to collect distinct conditional pages.
 
     if (probeFingerprints.size <= 1 && unresolvedIndexes.length === 0) {
       console.log(`Branch comparison result: all ${outcomes.length} answers lead to the same immediate next page. No conditional branch detected.`);
