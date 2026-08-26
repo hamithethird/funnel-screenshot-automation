@@ -1,0 +1,80 @@
+name: Apply scratch numbering fix
+
+on:
+  push:
+    paths:
+      - '.github/scratch-numbering-fix-trigger.txt'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Patch crawler and syntax check
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('funnel-crawler-multiscreen.js')
+          s = p.read_text()
+
+          # Track the exact state that received the current numbered screenshot.
+          old = "  let skipNextNumberedFingerprint = null;\n"
+          new = "  let skipNextNumberedFingerprint = null;\n  let currentNumberedCaptureSignature = null;\n"
+          if 'let currentNumberedCaptureSignature = null;' not in s:
+            if old not in s:
+              raise SystemExit('global screenshot-state marker missing')
+            s = s.replace(old, new, 1)
+
+          # A scratch screen reached after advancing the numbered page must wait for
+          # the next outer iteration, so the closed scratch card gets its own number.
+          old = "    const beforeState = state || await inspectPage();\n    const beforeSignature = pageSignature(beforeState);\n    const target = page.locator(`[data-crawler-scratch-id=\"${probe.id}\"]`);\n"
+          new = "    const beforeState = state || await inspectPage();\n    const beforeSignature = pageSignature(beforeState);\n\n    if (currentNumberedCaptureSignature && beforeSignature !== currentNumberedCaptureSignature) {\n      console.log('Scratch/reveal page appeared after the current numbered screenshot. Deferring interaction so its closed state is captured on the next numbered screen.');\n      return { handled: true, advanced: true };\n    }\n\n    const target = page.locator(`[data-crawler-scratch-id=\"${probe.id}\"]`);\n"
+          if 'Scratch/reveal page appeared after the current numbered screenshot.' not in s:
+            if old not in s:
+              raise SystemExit('scratch pre-interaction marker missing')
+            s = s.replace(old, new, 1)
+
+          # Mouse scratching can leave a browser text/image selection active. Clear
+          # that selection before any reveal screenshot so the blue selection tint
+          # is never baked into the PNG.
+          old = "    await waitForScreenshotReady({ minimumWaitMs: 700, maxWaitMs: 2600, pollMs: 250 });\n    const afterState = await inspectPage();\n"
+          new = "    await page.evaluate(() => {\n      const selection = window.getSelection?.();\n      if (selection) selection.removeAllRanges();\n      const active = document.activeElement;\n      if (active && typeof active.blur === 'function') active.blur();\n    }).catch(() => {});\n    await page.waitForTimeout(120);\n    await waitForScreenshotReady({ minimumWaitMs: 700, maxWaitMs: 2600, pollMs: 250 });\n    const afterState = await inspectPage();\n"
+          if 'selection.removeAllRanges();' not in s:
+            if old not in s:
+              raise SystemExit('scratch screenshot-ready marker missing')
+            s = s.replace(old, new, 1)
+
+          # The fully disclosed scratch result is intentionally the "b" variant of
+          # its numbered closed-state page, matching the funnel capture convention.
+          old = "    if (screenNumber !== null && changed) {\n      await captureSupplementalState(screenNumber, afterState, 'scratch/reveal completed', [], 0.99);\n    }\n"
+          new = "    if (screenNumber !== null && changed) {\n      const revealFilename = path.join(OUTPUT_DIR, `${String(screenNumber).padStart(2, '0')}b.png`);\n      await page.screenshot({ path: revealFilename, fullPage: true });\n      console.log(`Captured scratch/reveal completed: ${revealFilename}`);\n      // Reserve a/b in the supplemental counter so later variants continue at c.\n      supplementalCounterByScreen.set(screenNumber, Math.max(supplementalCounterByScreen.get(screenNumber) || 0, 2));\n    }\n"
+          if 'Captured scratch/reveal completed:' not in s:
+            if old not in s:
+              raise SystemExit('scratch supplemental capture marker missing')
+            s = s.replace(old, new, 1)
+
+          # Remember the page that was actually assigned the numbered screenshot.
+          old = "    registerBaseScreenshot(screenNumber, filename);\n    console.log(`\\nCaptured ${filename}`);\n"
+          new = "    registerBaseScreenshot(screenNumber, filename);\n    currentNumberedCaptureSignature = pageSignature(state);\n    console.log(`\\nCaptured ${filename}`);\n"
+          if 'currentNumberedCaptureSignature = pageSignature(state);' not in s:
+            if old not in s:
+              raise SystemExit('numbered screenshot registration marker missing')
+            s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+          node --check funnel-crawler-multiscreen.js
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add funnel-crawler-multiscreen.js
+          if git diff --cached --quiet; then
+            echo "No crawler changes needed"
+          else
+            git commit -m "Fix scratch reveal capture ordering and selection tint"
+            git push origin main
+          fi
