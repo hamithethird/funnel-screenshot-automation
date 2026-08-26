@@ -1,0 +1,29 @@
+name: Run corner navigation patch
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/run-corner-navigation-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Apply patch
+        run: python3 scripts/apply_corner_navigation_fix.py
+      - name: Syntax check
+        run: node --check funnel-crawler-multiscreen.js
+      - name: Commit patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add funnel-crawler-multiscreen.js
+          git commit -m "Use native corner controls for backtracking and skip escapes" || exit 0
+          git push origin main
