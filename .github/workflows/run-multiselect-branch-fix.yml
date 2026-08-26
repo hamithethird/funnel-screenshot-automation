@@ -1,0 +1,28 @@
+name: Run multi-select branch fix
+
+on:
+  push:
+    paths:
+      - '.github/workflows/run-multiselect-branch-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Apply patch
+        run: python3 .github/scripts/apply_multiselect_branch_fix.py
+      - name: Syntax check
+        run: node --check funnel-crawler-multiscreen.js
+      - name: Commit
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add funnel-crawler-multiscreen.js
+          git commit -m "Preserve branch landings and probe multi-select transitions" || exit 0
+          git push origin main
