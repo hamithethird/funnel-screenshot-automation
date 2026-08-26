@@ -2737,7 +2737,10 @@ function sanitizeUrl(rawUrl) {
     if (probeFingerprints.size <= 1 && unresolvedIndexes.length === 0) {
       console.log(`Branch comparison result: all ${outcomes.length} answers lead to the same immediate next page. No conditional branch detected.`);
       const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
-      if (!restored) return false;
+      if (!restored) {
+        console.log('Branch source could not be restored. Preserving the current landing page for the next numbered screenshot.');
+        return outcomes.length > 0;
+      }
       const finalResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);
       return finalResult.advanced;
     }
@@ -2745,7 +2748,10 @@ function sanitizeUrl(rawUrl) {
     if (probeFingerprints.size <= 1 && unresolvedIndexes.length > 0) {
       console.log('No different transition was proven, but at least one answer remains unresolved. The crawler will not claim that all answers are identical. Continuing on the normal path without conditional screenshots.');
       const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
-      if (!restored) return false;
+      if (!restored) {
+        console.log('Branch source could not be restored. Preserving the current landing page for the next numbered screenshot.');
+        return outcomes.length > 0;
+      }
       const finalResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);
       return finalResult.advanced;
     }
@@ -2778,7 +2784,10 @@ function sanitizeUrl(rawUrl) {
     if (uniqueOutcomes.length <= 1) {
       console.log('After full comparison, all answers collapsed to one unique next page. No conditional screenshots will be created.');
       const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
-      if (!restored) return false;
+      if (!restored) {
+        console.log('Branch source could not be restored. Preserving the current landing page for the next numbered screenshot.');
+        return outcomes.length > 0;
+      }
       const finalResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);
       return finalResult.advanced;
     }
@@ -2792,8 +2801,8 @@ function sanitizeUrl(rawUrl) {
 
     const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
     if (!restored) {
-      console.log('Conditional pages were captured, but the main question could not be restored safely.');
-      return false;
+      console.log('Conditional pages were captured, but the main question could not be restored safely. Preserving the current landing page for the next numbered screenshot.');
+      return true;
     }
 
     const finalResult = await chooseBranchOptionAndAdvance(optionTexts[0], screenNumber, questionState);
