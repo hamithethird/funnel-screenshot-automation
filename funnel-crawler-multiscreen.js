@@ -2808,6 +2808,42 @@ function sanitizeUrl(rawUrl) {
     return false;
   }
 
+  function branchOutcomeEquivalent(a, b) {
+    if (!a || !b) return false;
+
+    if (a.screenshotBuffer && b.screenshotBuffer &&
+        Buffer.isBuffer(a.screenshotBuffer) && Buffer.isBuffer(b.screenshotBuffer) &&
+        a.screenshotBuffer.equals(b.screenshotBuffer)) {
+      return true;
+    }
+
+    const textA = a.fingerprint || normalizeContextText(a.landingState?.pageText || '');
+    const textB = b.fingerprint || normalizeContextText(b.landingState?.pageText || '');
+    if (!textA || !textB) return false;
+
+    const similarity = contextSimilarity(textA, textB);
+    if (similarity >= 0.985) return true;
+
+    const numericClaims = text => (text.match(/\b\d+(?:[.,]\d+)?%?\b/g) || []).join('|');
+    if (similarity >= 0.955 && numericClaims(textA) === numericClaims(textB)) return true;
+
+    return false;
+  }
+
+  function uniqueBranchOutcomeGroups(outcomes) {
+    const groups = [];
+    for (const outcome of outcomes) {
+      let group = groups.find(item => branchOutcomeEquivalent(item, outcome));
+      if (!group) {
+        group = { ...outcome, answers: [], answerSets: [] };
+        groups.push(group);
+      }
+      if (outcome.optionText) group.answers.push(outcome.optionText);
+      if (outcome.answers) group.answerSets.push(outcome.answers);
+    }
+    return groups;
+  }
+
   function branchProbeIndexes(optionCount, maxProbe = 4) {
     const indexes = Array.from({ length: optionCount }, (_, i) => i);
     for (let i = indexes.length - 1; i > 0; i--) {
@@ -3019,16 +3055,7 @@ function sanitizeUrl(rawUrl) {
       return false;
     }
 
-    const uniqueOutcomes = [];
-    for (const outcome of outcomes) {
-      let existing = uniqueOutcomes.find(item => item.fingerprint === outcome.fingerprint);
-      if (!existing) {
-        existing = { ...outcome, answerSets: [outcome.answers] };
-        uniqueOutcomes.push(existing);
-      } else {
-        existing.answerSets.push(outcome.answers);
-      }
-    }
+    const uniqueOutcomes = uniqueBranchOutcomeGroups(outcomes);
 
     if (uniqueOutcomes.length > 1) {
       console.log(`Conditional multi-select branching confirmed: ${uniqueOutcomes.length} unique next pages found.`);
@@ -3138,7 +3165,7 @@ function sanitizeUrl(rawUrl) {
       return finalResult.advanced;
     }
 
-    let probeFingerprints = new Set(outcomes.map(x => x.fingerprint));
+    let probeFingerprints = new Set(uniqueBranchOutcomeGroups(outcomes).map((_, i) => String(i)));
 
     // A failed probe is unresolved evidence, not proof that there is no branch.
     // Retry only the failed answer(s), after the successful first attempts have
@@ -3151,7 +3178,7 @@ function sanitizeUrl(rawUrl) {
           console.log(`Branch answer "${optionTexts[index]}" is still unresolved after retry. It will be skipped without aborting the crawl.`);
         }
       }
-      probeFingerprints = new Set(outcomes.map(x => x.fingerprint));
+      probeFingerprints = new Set(uniqueBranchOutcomeGroups(outcomes).map((_, i) => String(i)));
     }
 
     let testedIndexes = new Set(outcomes.map(x => x.index));
@@ -3199,16 +3226,7 @@ function sanitizeUrl(rawUrl) {
       alreadyTested.add(index);
     }
 
-    const uniqueOutcomes = [];
-    for (const outcome of outcomes) {
-      let existing = uniqueOutcomes.find(item => item.fingerprint === outcome.fingerprint);
-      if (!existing) {
-        existing = { ...outcome, answers: [outcome.optionText] };
-        uniqueOutcomes.push(existing);
-      } else {
-        existing.answers.push(outcome.optionText);
-      }
-    }
+    const uniqueOutcomes = uniqueBranchOutcomeGroups(outcomes);
 
     if (uniqueOutcomes.length <= 1) {
       console.log('After full comparison, all answers collapsed to one unique next page. No conditional screenshots will be created.');
