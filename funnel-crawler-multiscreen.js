@@ -1530,18 +1530,58 @@ function sanitizeUrl(rawUrl) {
     return best;
   }
 
+  async function getVisibleFormIntentText() {
+    return await page.evaluate(() => {
+      const visible = el => {
+        const r = el.getBoundingClientRect();
+        const st = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 &&
+          r.top < window.innerHeight && r.left < window.innerWidth &&
+          st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity) > 0;
+      };
+      const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+      const parts = [];
+      const selectors = [
+        'h1', 'h2', 'h3', '[role="heading"]',
+        'label', 'legend', '[aria-label]'
+      ];
+      for (const selector of selectors) {
+        for (const el of document.querySelectorAll(selector)) {
+          if (!visible(el)) continue;
+          const text = normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+          if (!text || text.length > 220) continue;
+          parts.push(text);
+        }
+      }
+      return normalize(parts.join(' ')).slice(0, 1200);
+    }).catch(() => '');
+  }
+
   async function handleProfileNumericInput(state, screenNumber = null) {
     const pageText = (state?.pageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
     if (!pageText) return { recognized: false, advanced: false };
 
+    // SPA funnels can keep stale prior-step text in the DOM. Numeric profile
+    // classification therefore uses the currently visible heading/label intent
+    // first, rather than broad body text from previous screens.
+    const visibleIntent = (await getVisibleFormIntentText()).toLowerCase().replace(/\s+/g, ' ').trim();
+    const semanticText = visibleIntent || pageText;
+
+    // Explicit non-numeric form intent must win over stale numeric words left in
+    // the DOM. This prevents a "What's your name?" screen from inheriting the
+    // previous weight screen's value/logic.
+    if (/\bwhat(?:'s| is) your name\b|\benter (?:your )?name\b|\byour name\b/i.test(visibleIntent)) {
+      return { recognized: false, advanced: false };
+    }
+
     let profileType = null;
-    if (/\b(goal|target|desired)\s+weight\b|what(?:'s| is) your goal weight|goal weight/i.test(pageText)) {
+    if (/\b(goal|target|desired)\s+weight\b|what(?:'s| is) your goal weight|goal weight/i.test(semanticText)) {
       profileType = 'goal-weight';
-    } else if (/\b(current\s+weight|your\s+current\s+weight|what(?:'s| is) your current weight|your weight)\b/i.test(pageText)) {
+    } else if (/\bcurrent\s+weight\b|what(?:'s| is) your current weight\b|\bhow much do you weigh\b/i.test(semanticText)) {
       profileType = 'current-weight';
-    } else if (/\b(how tall are you|your height|height)\b/i.test(pageText)) {
+    } else if (/\bhow tall are you\b|\byour height\b|\bheight\b/i.test(semanticText)) {
       profileType = 'height';
-    } else if (/\b(how old are you|your age|age)\b/i.test(pageText)) {
+    } else if (/\bhow old are you\b|\byour age\b|\bage\b/i.test(semanticText)) {
       profileType = 'age';
     }
     if (!profileType) return { recognized: false, advanced: false };
@@ -1673,6 +1713,7 @@ function sanitizeUrl(rawUrl) {
   }
 
   async function handleGenericFormInput(state) {
+    const visibleFormIntent = (await getVisibleFormIntentText()).toLowerCase().replace(/\s+/g, ' ').trim();
     const fields = page.locator(
       'input:not([type]), input[type="text"], input[type="email"], input[type="password"], textarea'
     );
@@ -1699,7 +1740,7 @@ function sanitizeUrl(rawUrl) {
           label: labelText.trim().toLowerCase()
         };
       });
-      const signals = [info.name, info.placeholder, info.autocomplete, info.ariaLabel, info.label].join(' ');
+      const signals = [info.name, info.placeholder, info.autocomplete, info.ariaLabel, info.label, visibleFormIntent].join(' ');
       let fieldType = null;
       let value = null;
       if (info.type === 'email' || info.autocomplete === 'email' || /\be-?mail\b/i.test(signals)) {
