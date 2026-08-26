@@ -420,7 +420,18 @@ function sanitizeUrl(rawUrl) {
     return result;
   }
 
-  const RUN_EMAIL = 'hami.aksakal@hubx.co';
+  const BASE_RUN_EMAIL = 'hami.aksakal@hubx.co';
+  let runEmailSuffix = 0;
+
+  function currentRunEmail() {
+    if (runEmailSuffix <= 0) return BASE_RUN_EMAIL;
+    return `hami.aksakal${runEmailSuffix}@hubx.co`;
+  }
+
+  function advanceRunEmail() {
+    runEmailSuffix += 1;
+    return currentRunEmail();
+  }
 
   function generateRunPassword(length = 16) {
     const lowercase = 'abcdefghijklmnopqrstuvwxyz';
@@ -2210,6 +2221,27 @@ function sanitizeUrl(rawUrl) {
     return { recognized: false, advanced: false };
   }
 
+  async function emailAlreadyUsedDetected(input) {
+    const pageText = await page.evaluate(() => (document.body?.innerText || '').replace(/\s+/g, ' ').trim()).catch(() => '');
+    const validationMessage = await input.evaluate(el => el.validationMessage || '').catch(() => '');
+    const combined = `${pageText} ${validationMessage}`.toLowerCase();
+    return /(?:email|e-mail|account|user).{0,45}(?:already|exists|registered|taken|used|in use)|(?:already|exists|registered|taken|used|in use).{0,45}(?:email|e-mail|account|user)|duplicate (?:email|account|user)/i.test(combined);
+  }
+
+  async function retryWithNextEmailIfNeeded(input) {
+    if (!(await emailAlreadyUsedDetected(input))) return null;
+    const nextEmail = advanceRunEmail();
+    console.log(`Email is already registered/in use. Retrying with: ${nextEmail}`);
+    await input.fill(nextEmail);
+    await input.evaluate(el => {
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.blur();
+    });
+    await page.waitForTimeout(500);
+    return nextEmail;
+  }
+
   async function handleGenericFormInput(state) {
     const visibleFormIntent = (await getVisibleFormIntentText()).toLowerCase().replace(/\s+/g, ' ').trim();
     const explicitProfileIntent = await detectExplicitProfileIntent();
@@ -2277,7 +2309,7 @@ function sanitizeUrl(rawUrl) {
       let value = null;
       if (info.type === 'email' || info.autocomplete === 'email' || /\be-?mail\b/i.test(signals)) {
         fieldType = 'email';
-        value = RUN_EMAIL;
+        value = currentRunEmail();
       } else if (
         info.type === 'password' || ['new-password', 'current-password'].includes(info.autocomplete) ||
         /\b(password|passcode|create[\s_-]*password|confirm[\s_-]*password)\b/i.test(signals)
@@ -2333,6 +2365,9 @@ function sanitizeUrl(rawUrl) {
           if (!termsBeforeSubmit.active) return { recognized: true, advanced: false };
           const submittedByClick = await safeCrawlerClick(submit, 'form submit control');
           if (submittedByClick && await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
+          if (fieldType === 'email' && await retryWithNextEmailIfNeeded(input)) {
+            return await handleGenericFormInput(await inspectPageNavigationSafe('email collision retry'));
+          }
         }
         const submitted = await input.evaluate(el => {
           const formEl = el.closest('form');
@@ -2341,6 +2376,9 @@ function sanitizeUrl(rawUrl) {
           return true;
         });
         if (submitted && await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
+        if (fieldType === 'email' && await retryWithNextEmailIfNeeded(input)) {
+          return await handleGenericFormInput(await inspectPageNavigationSafe('email collision retry'));
+        }
       }
       const nearbyAction = await findBottomPrimaryFormAction(input);
       if (nearbyAction) {
@@ -2348,12 +2386,18 @@ function sanitizeUrl(rawUrl) {
         if (!termsBeforeNearbyAction.active) return { recognized: true, advanced: false };
         const clicked = await safeCrawlerClick(nearbyAction.locator, nearbyAction.text || 'bottom primary CTA');
         if (clicked && await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
+        if (fieldType === 'email' && await retryWithNextEmailIfNeeded(input)) {
+          return await handleGenericFormInput(await inspectPageNavigationSafe('email collision retry'));
+        }
       }
       const termsBeforeEnter = await handleRequiredAgreementCheckboxes(input);
       if (!termsBeforeEnter.active) return { recognized: true, advanced: false };
       console.log(`Trying Enter for ${fieldType} input.`);
       await input.press('Enter');
       if (await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
+      if (fieldType === 'email' && await retryWithNextEmailIfNeeded(input)) {
+        return await handleGenericFormInput(await inspectPageNavigationSafe('email collision retry'));
+      }
       console.log(`Unable to safely submit ${fieldType} field.`);
       return { recognized: true, advanced: false };
     }
