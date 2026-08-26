@@ -3245,6 +3245,36 @@ function sanitizeUrl(rawUrl) {
   }
 
   async function handleExplicitAgeSelection(state) {
+    // Age can be a card/choice task, not only a writable numeric input.
+    // If most answer choices are age ranges, choose the range containing age 25
+    // before speech detection, branch probing, or numeric-input handling.
+    const ageRangeOptions = (state?.group || []).map(option => {
+      const raw = (option.text || '').trim();
+      const normalized = raw.replace(/[–—]/g, '-');
+      const range = normalized.match(/(?:age\s*:\s*)?(\d{1,3})\s*-\s*(\d{1,3})/i);
+      const plus = normalized.match(/(?:age\s*:\s*)?(\d{1,3})\s*\+/i);
+      if (range) return { option, min: Number(range[1]), max: Number(range[2]), raw };
+      if (plus) return { option, min: Number(plus[1]), max: Infinity, raw };
+      return null;
+    }).filter(Boolean);
+
+    if (ageRangeOptions.length >= 2 && ageRangeOptions.length >= Math.ceil((state?.group?.length || 0) * 0.6)) {
+      const targetAge = 25;
+      const chosen = ageRangeOptions.find(item => targetAge >= item.min && targetAge <= item.max) || ageRangeOptions[0];
+      console.log(`Age-range choice page detected from answer options. Choosing the range containing age ${targetAge}:`, chosen.raw);
+      const beforeSignature = pageSignature(state);
+      const clicked = await safeCrawlerClick(
+        page.locator(`[data-auto-id="${chosen.option.id}"]`),
+        chosen.raw || 'age-range option'
+      );
+      if (!clicked) return { handled: true, advanced: false };
+      if (await waitForAdvancement(beforeSignature, 12000)) return { handled: true, advanced: true };
+      const afterSelection = await inspectPageNavigationSafe('age-range choice post-click');
+      const nav = await clickStrongNavigation(afterSelection, 'age-range selection navigation CTA');
+      if (nav.handled) return { handled: true, advanced: nav.advanced };
+      return { handled: true, advanced: false };
+    }
+
     const pageText = (state?.pageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
     if (!pageText) return { handled: false, advanced: false };
 
