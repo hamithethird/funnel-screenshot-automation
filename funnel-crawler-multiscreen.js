@@ -2617,6 +2617,11 @@ function sanitizeUrl(rawUrl) {
     }
 
     const beforeSignature = pageSignature(state);
+    // pageSignature is intentionally text-centric. Some SPA funnels reveal a
+    // numeric/text input without changing visible body text, so remember whether
+    // an editable field already existed before the interaction. This lets the
+    // outer loop distinguish "nothing changed" from "a real form step appeared".
+    const beforeHadEditableInput = await hasVisibleEditableInput();
     let acted = false;
 
     // Read explicit page intent before generic branch exploration. A page whose
@@ -2649,6 +2654,16 @@ function sanitizeUrl(rawUrl) {
     const afterState = await inspectPage();
     const afterSignature = pageSignature(afterState);
     if (afterSignature === beforeSignature) {
+      const afterHasEditableInput = await hasVisibleEditableInput();
+      if (!beforeHadEditableInput && afterHasEditableInput) {
+        // A real form step appeared even though its heading/body text reused the
+        // prior SPA shell. Do NOT stop here. Let the next numbered iteration
+        // screenshot that form first, then advanceOneScreen will run the semantic
+        // profile handler (height 180 cm, current weight variants ending at 80 kg,
+        // goal weight variants ending at 70 kg, age 25) or the generic form handler.
+        console.log('Editable form input appeared without a text-signature change. Treating this as real page advancement and continuing so the form can be captured and handled.');
+        continue;
+      }
       console.log('No page advancement detected. Stopping safely.');
       break;
     }
