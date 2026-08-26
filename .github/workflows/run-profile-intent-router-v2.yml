@@ -1,0 +1,29 @@
+name: Run profile intent router v2
+
+on:
+  push:
+    paths:
+      - '.github/workflows/run-profile-intent-router-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Apply patch
+        run: python3 .github/scripts/patch_profile_intent_router_v2.py
+      - name: Check syntax
+        run: node --check funnel-crawler-multiscreen.js
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add funnel-crawler-multiscreen.js
+          git diff --cached --quiet && exit 0
+          git commit -m "Route profile pages from visible page intent"
+          git push origin main
