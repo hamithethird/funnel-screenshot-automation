@@ -1,0 +1,55 @@
+name: Apply branch question vs transition fix
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Patch branch landing classification
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('funnel-crawler-multiscreen.js')
+          s = p.read_text()
+
+          old = '''    console.log(`Saving ${uniqueOutcomes.length} unique conditional next pages as lettered screenshots.`);\n    for (let i = 0; i < uniqueOutcomes.length; i++) {\n      const filename = path.join(OUTPUT_DIR, `${String(screenNumber).padStart(2, '0')}${branchLetter(i)}.png`);\n      fs.writeFileSync(filename, uniqueOutcomes[i].screenshotBuffer);\n      console.log(`Captured ${path.basename(filename)} for answer(s): ${uniqueOutcomes[i].answers.join(' | ')}`);\n    }\n\n    const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);\n'''
+
+          new = '''    // Distinguish a true transition page from a conditional NEXT QUESTION.\n    // A landing page that already contains another answer group is not a passive\n    // transition. Previously we saved those as source-page letters (07a, 07b...)\n    // and then tried to auto-advance them as if they were transitions, which can\n    // juxtapose two consecutive question steps and stop the crawl.\n    const conditionalQuestionOutcomes = uniqueOutcomes.filter(item => (item.landingState?.group?.length || 0) >= 2);\n    const conditionalTransitionOutcomes = uniqueOutcomes.filter(item => (item.landingState?.group?.length || 0) < 2);\n\n    if (conditionalTransitionOutcomes.length > 0) {\n      console.log(`Saving ${conditionalTransitionOutcomes.length} genuine conditional transition page(s) as source-page lettered screenshots.`);\n      for (let i = 0; i < conditionalTransitionOutcomes.length; i++) {\n        const filename = nextFreeLetteredFilename(screenNumber);\n        if (!filename) continue;\n        fs.writeFileSync(filename, conditionalTransitionOutcomes[i].screenshotBuffer);\n        console.log(`Captured ${path.basename(filename)} transition for answer(s): ${conditionalTransitionOutcomes[i].answers.join(' | ')}`);\n      }\n    }\n\n    if (conditionalQuestionOutcomes.length > 1) {\n      // The first normal path will become the next numbered screenshot (for example\n      // 08.png). Save only the ALTERNATE next-question variants as 08a, 08b, ...\n      // rather than incorrectly attaching them to the source question as 07a, 07b.\n      const canonicalQuestionOutcome = conditionalQuestionOutcomes.find(item => item.answers.includes(optionTexts[0])) || conditionalQuestionOutcomes[0];\n      const alternateQuestionOutcomes = conditionalQuestionOutcomes.filter(item => item !== canonicalQuestionOutcome);\n      console.log(`Conditional next-question variants detected: ${conditionalQuestionOutcomes.length}. The main path will be ${String(screenNumber + 1).padStart(2, '0')}.png; saving ${alternateQuestionOutcomes.length} alternate variant(s) beside it.`);\n      for (const outcome of alternateQuestionOutcomes) {\n        const filename = nextFreeLetteredFilename(screenNumber + 1);\n        if (!filename) continue;\n        fs.writeFileSync(filename, outcome.screenshotBuffer);\n        console.log(`Captured ${path.basename(filename)} conditional next-question variant for answer(s): ${outcome.answers.join(' | ')}`);\n      }\n    }\n\n    const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);\n'''
+
+          if old not in s:
+              if 'Conditional next-question variants detected:' in s:
+                  raise SystemExit(0)
+              raise SystemExit('single-select conditional screenshot block not found')
+          s = s.replace(old, new, 1)
+
+          old2 = '''    const mainFingerprint = normalizeContextText(finalResult.landingState.pageText);\n    if (uniqueOutcomes.some(item => item.fingerprint === mainFingerprint)) {\n      skipNextNumberedFingerprint = mainFingerprint;\n      console.log('Main path is currently on a transition already captured as a lettered screenshot; the next numbered capture will skip over it.');\n    }\n'''
+          new2 = '''    const mainFingerprint = normalizeContextText(finalResult.landingState.pageText);\n    // Skip the next numbered page ONLY when it is a genuine transition that was\n    // already saved under the source screen. Never skip a conditional question:\n    // it must become the next numbered screenshot and remain actionable.\n    if (conditionalTransitionOutcomes.some(item => item.fingerprint === mainFingerprint)) {\n      skipNextNumberedFingerprint = mainFingerprint;\n      console.log('Main path is currently on a genuine transition already captured as a source-page lettered screenshot; the duplicate numbered transition will be skipped.');\n    } else if ((finalResult.landingState?.group?.length || 0) >= 2) {\n      console.log('Main path landed on another question, not a transition. It will be captured normally as the next numbered screen.');\n    }\n'''
+          if old2 not in s:
+              if 'Main path landed on another question, not a transition.' in s:
+                  raise SystemExit(0)
+              raise SystemExit('single-select skip-next block not found')
+          s = s.replace(old2, new2, 1)
+
+          s = s.replace('Branching is confirmed, so the crawler will now test every remaining unresolved answer to collect all unique transition pages.', 'Branching is confirmed, so the crawler will now test every remaining unresolved answer to classify unique next-page variants.')
+
+          p.write_text(s)
+          PY
+          node --check funnel-crawler-multiscreen.js
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add funnel-crawler-multiscreen.js
+          git commit -m 'Distinguish conditional questions from transitions'
+          git push
