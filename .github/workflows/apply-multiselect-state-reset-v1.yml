@@ -1,0 +1,209 @@
+name: Apply multi-select state reset v1
+
+on:
+  push:
+    paths:
+      - '.github/multiselect-state-reset-v1-trigger.txt'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Patch multi-select branch state handling
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('funnel-crawler-multiscreen.js')
+          s = p.read_text()
+
+          marker = "  function sameQuestionIgnoringSelectionVisuals(originalState, currentState) {\n"
+          helper = r'''  function canonicalAnswerText(text) {
+    return (text || '')
+      .toLowerCase()
+      .replace(/[✓✔☑✅]/g, ' ')
+      .replace(/\b(?:selected|checked)\b/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function answerTextLooksSelected(text) {
+    return /[✓✔☑✅]/.test(text || '');
+  }
+
+  async function clearPersistedMultiSelectSelections(questionState) {
+    // Some SPAs restore the question but preserve previously checked answers.
+    // Branch tests must be independent, so clear only controls that are explicitly
+    // reported as selected before testing the next answer set.
+    for (let pass = 0; pass < 12; pass++) {
+      const currentState = await inspectPageNavigationSafe('multi-select selection reset').catch(() => null);
+      if (!currentState || !sameQuestionIgnoringSelectionVisuals(questionState, currentState)) return false;
+      const options = uniqueAnswerOptions(currentState.group || []);
+      let selectedOption = null;
+      for (const option of options) {
+        const locator = page.locator(`[data-auto-id="${option.id}"]`);
+        const domSelected = await locator.evaluate(el => {
+          const truthy = value => ['true', 'checked', 'selected', 'on'].includes((value || '').toLowerCase());
+          if (truthy(el.getAttribute('aria-checked')) || truthy(el.getAttribute('aria-selected')) || truthy(el.getAttribute('data-state'))) return true;
+          if (el.matches('input:checked')) return true;
+          if (el.querySelector('input:checked, [aria-checked="true"], [aria-selected="true"], [data-state="checked"], [data-state="selected"]')) return true;
+          return false;
+        }).catch(() => false);
+        if (domSelected || answerTextLooksSelected(option.text || '')) {
+          selectedOption = option;
+          break;
+        }
+      }
+      if (!selectedOption) {
+        if (pass > 0) console.log('Cleared persisted multi-select selections before the next independent branch test.');
+        return true;
+      }
+      const clicked = await safeCrawlerClick(
+        page.locator(`[data-auto-id="${selectedOption.id}"]`),
+        `clear persisted multi-select selection ${selectedOption.text || ''}`
+      );
+      if (!clicked) return false;
+      await page.waitForTimeout(300);
+    }
+    return false;
+  }
+
+'''
+          if 'function canonicalAnswerText(text)' not in s:
+            if marker not in s:
+              raise SystemExit('sameQuestionIgnoringSelectionVisuals marker not found')
+            s = s.replace(marker, helper + marker, 1)
+
+          old = r'''  function sameQuestionIgnoringSelectionVisuals(originalState, currentState) {
+    if (!originalState || !currentState) return false;
+    const originalPrompt = questionPromptFingerprint(originalState);
+    const currentPrompt = questionPromptFingerprint(currentState);
+    if (!originalPrompt || !currentPrompt || contextSimilarity(originalPrompt, currentPrompt) < 0.82) return false;
+    const originalOptions = uniqueAnswerOptions(originalState.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+    const currentOptions = uniqueAnswerOptions(currentState.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+    if (originalOptions.length < 2 || currentOptions.length < 2) return false;
+    const overlap = originalOptions.filter(text => currentOptions.includes(text)).length;
+    return overlap >= Math.max(2, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.7));
+  }
+'''
+          new = r'''  function sameQuestionIgnoringSelectionVisuals(originalState, currentState) {
+    if (!originalState || !currentState) return false;
+    const originalPrompt = questionPromptFingerprint(originalState);
+    const currentPrompt = questionPromptFingerprint(currentState);
+    if (!originalPrompt || !currentPrompt || contextSimilarity(originalPrompt, currentPrompt) < 0.82) return false;
+    const originalOptions = uniqueAnswerOptions(originalState.group || []).map(x => canonicalAnswerText(x.text)).filter(Boolean);
+    const currentOptions = uniqueAnswerOptions(currentState.group || []).map(x => canonicalAnswerText(x.text)).filter(Boolean);
+    if (originalOptions.length < 2 || currentOptions.length < 2) return false;
+    const overlap = originalOptions.filter(text => currentOptions.includes(text)).length;
+    return overlap >= Math.max(2, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.7));
+  }
+'''
+          if old in s:
+            s = s.replace(old, new, 1)
+
+          # Match answer texts independently of UI-added checkmarks.
+          old = """      const wanted = (wantedText || '').trim().toLowerCase();
+      let option = uniqueGroup.find(x => (x.text || '').trim().toLowerCase() === wanted);
+      if (!option) option = uniqueGroup.find(x => (x.text || '').trim().toLowerCase().includes(wanted));
+"""
+          new = """      const wanted = canonicalAnswerText(wantedText);
+      let option = uniqueGroup.find(x => canonicalAnswerText(x.text) === wanted);
+      if (!option) option = uniqueGroup.find(x => canonicalAnswerText(x.text).includes(wanted));
+"""
+          if old in s:
+            s = s.replace(old, new, 1)
+
+          # Same-answer-set checks must ignore selection markers too.
+          old = """      const originalOptions = (questionState.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+      const currentOptions = (afterSelection.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+"""
+          new = """      const originalOptions = (questionState.group || []).map(x => canonicalAnswerText(x.text)).filter(Boolean);
+      const currentOptions = (afterSelection.group || []).map(x => canonicalAnswerText(x.text)).filter(Boolean);
+"""
+          if old in s:
+            s = s.replace(old, new, 1)
+
+          # Replace the restore gate inside exploreMultiSelectBranches. If native
+          # restore returns the same question with remembered selections, accept it,
+          # clear those selections, and continue instead of numbering it as a new page.
+          old = r'''      if (setIndex > 0) {
+        const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
+        if (!restored) {
+          const currentState = await inspectPageNavigationSafe('multi-select restore-failure identity check').catch(() => null);
+          if (sameQuestionIgnoringSelectionVisuals(state, currentState)) {
+            console.log('Restore verification was strict, but this is still the same multi-select question. Selection styling will not become another numbered page.');
+            return false;
+          }
+          console.log('Multi-select branch question could not be restored. Preserving the current landing page for the next numbered screenshot instead of interacting with it before capture.');
+          return true;
+        }
+      }
+'''
+          new = r'''      if (setIndex > 0) {
+        let restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
+        if (!restored) {
+          const currentState = await inspectPageNavigationSafe('multi-select restore-failure identity check').catch(() => null);
+          if (sameQuestionIgnoringSelectionVisuals(state, currentState)) {
+            console.log('Restore verification was strict, but this is still the same multi-select question with remembered selection styling. Reusing it as the source question.');
+            restored = currentState;
+          } else {
+            console.log('Multi-select branch question could not be restored. Preserving the current landing page for the next numbered screenshot instead of interacting with it before capture.');
+            return true;
+          }
+        }
+        const cleared = await clearPersistedMultiSelectSelections(state);
+        if (!cleared) {
+          console.log('Could not reliably clear persisted multi-select selections. Stopping branch comparison rather than testing cumulative answer sets or creating duplicate numbered pages.');
+          return false;
+        }
+      }
+'''
+          if old not in s:
+            raise SystemExit('exploreMultiSelectBranches restore block not found')
+          s = s.replace(old, new, 1)
+
+          # Final restore should likewise accept the same source question even if the
+          # SPA remembers checks; do not hand it to the outer loop as a new page.
+          old = r'''    if (!restored) {
+      const currentState = await inspectPageNavigationSafe('multi-select final restore identity check').catch(() => null);
+      if (sameQuestionIgnoringSelectionVisuals(state, currentState)) {
+        console.log('The multi-select source question is still the same page despite selected/unselected styling. It will not receive a new numbered screenshot.');
+        return false;
+      }
+      console.log('Could not restore the multi-select source question after comparison. Preserving the current landing page for the next numbered screenshot.');
+      return true;
+    }
+'''
+          new = r'''    if (!restored) {
+      const currentState = await inspectPageNavigationSafe('multi-select final restore identity check').catch(() => null);
+      if (sameQuestionIgnoringSelectionVisuals(state, currentState)) {
+        console.log('The multi-select source question is still the same page despite remembered selection styling. It will not receive a new numbered screenshot.');
+        await clearPersistedMultiSelectSelections(state).catch(() => false);
+        return false;
+      }
+      console.log('Could not restore the multi-select source question after comparison. Preserving the current landing page for the next numbered screenshot.');
+      return true;
+    }
+'''
+          if old in s:
+            s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+          node --check funnel-crawler-multiscreen.js
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add funnel-crawler-multiscreen.js
+          if git diff --cached --quiet; then
+            echo "No crawler changes needed"
+          else
+            git commit -m "Reset persisted multi-select state between branch tests"
+            git push origin main
+          fi
