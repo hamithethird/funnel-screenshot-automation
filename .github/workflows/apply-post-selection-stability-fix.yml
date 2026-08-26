@@ -1,0 +1,72 @@
+name: Apply post-selection stability fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Patch crawler
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('funnel-crawler-multiscreen.js')
+          s = p.read_text()
+
+          marker = "  async function handleAnswerGroup(state, screenNumber = null) {\n"
+          if marker not in s:
+            raise SystemExit('handleAnswerGroup marker missing')
+          helper = r'''  function isTransientPostSelectionShell(state) {
+    if (!state) return true;
+    const text = normalizeContextText(state.pageText || '');
+    const hasMeaningfulText = text.length >= 35;
+    const hasChoices = Array.isArray(state.group) && state.group.length > 0;
+    const hasCTA = !!state.cta;
+    return !hasMeaningfulText && !hasChoices && !hasCTA;
+  }
+
+  async function waitForPostSelectionSettle(label = 'post-selection state', minimumWaitMs = 2600, timeoutMs = 7000) {
+    // Many SPAs briefly unmount the question before mounting the next screen.
+    // Never classify or screenshot that intermediate blank/skeleton shell.
+    await page.waitForTimeout(minimumWaitMs);
+    const startedAt = Date.now();
+    let state = await inspectPageNavigationSafe(label);
+    while (Date.now() - startedAt < timeoutMs && isTransientPostSelectionShell(state)) {
+      console.log('Transient post-selection shell detected. Waiting for the real screen to mount.');
+      await page.waitForTimeout(450);
+      await silenceMedia();
+      state = await inspectPageNavigationSafe(label);
+    }
+    return state;
+  }
+
+'''
+          s = s.replace(marker, helper + marker, 1)
+
+          old = '''      selectedKeys.add(optionKey);\n      await page.waitForTimeout(650);\n\n      let afterSelection = await inspectPageNavigationSafe('answer selection inspection');\n      const samePageSelectionState = sanitizeUrl(page.url()) === initialUrl && afterSelection.group.length > 0;\n      const contextChanged = normalizeContextText(afterSelection.pageText) !== normalizeContextText(initialState.pageText);\n      const originalPrompt = questionPromptFingerprint(initialState);\n      const currentPrompt = questionPromptFingerprint(afterSelection);\n      const promptStillMatches = !!originalPrompt && !!currentPrompt && contextSimilarity(originalPrompt, currentPrompt) >= 0.86;\n      if (samePageSelectionState && promptStillMatches) {\n        await captureSamePageVisualVariant(screenNumber, `selection: ${option.text || '[no visible text]'}`);\n      }\n      const originalOptions = (initialState.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);\n      const currentOptions = (afterSelection.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);\n      const overlap = originalOptions.filter(text => currentOptions.includes(text)).length;\n      const sameAnswerSet = overlap >= Math.max(1, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.6));\n'''
+          new = '''      selectedKeys.add(optionKey);\n\n      // Do not judge the result immediately. Some funnels briefly render an empty\n      // SPA shell between the selected question and the real next page.\n      let afterSelection = await waitForPostSelectionSettle('answer selection inspection', 2600, 7000);\n      const samePageSelectionState = sanitizeUrl(page.url()) === initialUrl && afterSelection.group.length > 0;\n      const contextChanged = normalizeContextText(afterSelection.pageText) !== normalizeContextText(initialState.pageText);\n      const originalPrompt = questionPromptFingerprint(initialState);\n      const currentPrompt = questionPromptFingerprint(afterSelection);\n      const promptStillMatches = !!originalPrompt && !!currentPrompt && contextSimilarity(originalPrompt, currentPrompt) >= 0.86;\n      const originalOptions = (initialState.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);\n      const currentOptions = (afterSelection.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);\n      const overlap = originalOptions.filter(text => currentOptions.includes(text)).length;\n      const sameAnswerSet = overlap >= Math.max(1, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.6));\n\n      // A lettered same-page screenshot is only valid after the page has settled\n      // AND the original question/answer set is still present. A blank unmounting\n      // shell is never a same-page variant.\n      if (samePageSelectionState && promptStillMatches && sameAnswerSet && !isTransientPostSelectionShell(afterSelection)) {\n        await captureSamePageVisualVariant(screenNumber, `selection: ${option.text || '[no visible text]'}`);\n      }\n'''
+          if old not in s:
+            raise SystemExit('normal answer immediate-state block missing')
+          s = s.replace(old, new, 1)
+
+          old = '''      selected.push(option.text || wantedText);\n      await page.waitForTimeout(450);\n\n      const afterSelection = await inspectPageNavigationSafe('multi-select post-selection inspection');\n      const originalPrompt = questionPromptFingerprint(questionState);\n      const currentPrompt = questionPromptFingerprint(afterSelection);\n      const samePrompt = !!originalPrompt && !!currentPrompt && contextSimilarity(originalPrompt, currentPrompt) >= 0.86;\n      if (sanitizeUrl(page.url()) === questionUrl && samePrompt) {\n        await captureSamePageVisualVariant(screenNumber, `selection: ${selected.join(' + ')}`);\n      }\n'''
+          new = '''      selected.push(option.text || wantedText);\n\n      const afterSelection = await waitForPostSelectionSettle('multi-select post-selection inspection', 2600, 7000);\n      const originalPrompt = questionPromptFingerprint(questionState);\n      const currentPrompt = questionPromptFingerprint(afterSelection);\n      const samePrompt = !!originalPrompt && !!currentPrompt && contextSimilarity(originalPrompt, currentPrompt) >= 0.86;\n      const originalOptions = (questionState.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);\n      const currentOptions = (afterSelection.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);\n      const overlap = originalOptions.filter(text => currentOptions.includes(text)).length;\n      const sameAnswerSet = overlap >= Math.max(1, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.6));\n      if (sanitizeUrl(page.url()) === questionUrl && samePrompt && sameAnswerSet && !isTransientPostSelectionShell(afterSelection)) {\n        await captureSamePageVisualVariant(screenNumber, `selection: ${selected.join(' + ')}`);\n      }\n'''
+          if old not in s:
+            raise SystemExit('multi-select immediate-state block missing')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+          node --check funnel-crawler-multiscreen.js
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add funnel-crawler-multiscreen.js
+          git commit -m "Wait for stable screens after answer selections"
+          git push origin main
