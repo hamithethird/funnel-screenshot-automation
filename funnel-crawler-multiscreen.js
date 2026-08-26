@@ -1364,6 +1364,10 @@ function sanitizeUrl(rawUrl) {
       ? Math.min(instruction.maxSelections, availableAtStart)
       : Math.min(Math.max(minSelections + 3, 5), availableAtStart, 10);
     const selectedKeys = new Set();
+    // A multi-select page may visually react after every checked answer. We only
+    // need one screenshot proving that selected-state UI exists; subsequent
+    // selections are interaction state, not separate funnel screens.
+    let capturedSelectionVisual = false;
 
     console.log('Selection instruction detected:', {
       reason: instruction.reason,
@@ -1414,8 +1418,12 @@ function sanitizeUrl(rawUrl) {
       const currentOptions = (afterSelection.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
       const overlap = originalOptions.filter(text => currentOptions.includes(text)).length;
       const sameAnswerSet = overlap >= Math.max(1, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.6));
-      if (samePageSelectionState && promptStillMatches && sameAnswerSet && !isTransientPostSelectionShell(afterSelection)) {
-        await captureSamePageVisualVariant(screenNumber, `selection: ${option.text || '[no visible text]'}`);
+      if (samePageSelectionState && promptStillMatches && sameAnswerSet && !isTransientPostSelectionShell(afterSelection) && !capturedSelectionVisual) {
+        const captured = await captureSamePageVisualVariant(screenNumber, `selection: ${option.text || '[no visible text]'}`);
+        // Whether captureSamePageVisualVariant writes a file or deduplicates the
+        // state, do not manufacture more screenshots merely because more boxes
+        // are checked on this same question.
+        capturedSelectionVisual = true;
       }
 
       // A lettered screenshot here is reserved for a genuine same-question
