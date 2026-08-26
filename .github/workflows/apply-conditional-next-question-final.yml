@@ -1,0 +1,44 @@
+name: Apply conditional next question final
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Wait for older patch workflows to settle
+        run: sleep 45
+      - name: Patch latest main and push
+        shell: bash
+        run: |
+          set -e
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            python3 .github/scripts/patch_conditional_next_question.py
+            node --check funnel-crawler-multiscreen.js
+            if git diff --quiet; then
+              echo 'Conditional next-question fix is already present.'
+              exit 0
+            fi
+            git add funnel-crawler-multiscreen.js
+            git commit -m 'Classify conditional next questions separately from transitions'
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push raced with another workflow; retrying attempt $attempt"
+            sleep 10
+          done
+          echo 'Could not push conditional next-question fix after retries.' >&2
+          exit 1
