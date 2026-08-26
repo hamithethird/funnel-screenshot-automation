@@ -1,0 +1,30 @@
+name: Apply marketing opt-out and email CTA v1
+on:
+  push:
+    paths:
+      - '.github/marketing-optout-and-email-cta-v1-trigger.txt'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Apply patch
+        run: python3 .github/scripts/patch_marketing_optout_and_email_cta_v1.py
+      - name: Syntax check
+        run: node --check funnel-crawler-multiscreen.js
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add funnel-crawler-multiscreen.js
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Handle marketing opt-out and plan email CTA"
+            git push origin main
+          fi
