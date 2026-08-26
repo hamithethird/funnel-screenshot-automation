@@ -1,0 +1,76 @@
+name: Apply age-card selection v1
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/trigger-age-card-selection-v1.txt'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Patch crawler
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('funnel-crawler-multiscreen.js')
+          s = p.read_text()
+          marker = "  async function handleExplicitAgeSelection(state) {\n"
+          if marker not in s:
+              raise SystemExit('handleExplicitAgeSelection marker not found')
+          block = r'''    // Age can be a CARD/CHOICE task, not only a writable numeric input.
+    // If the answer group itself clearly consists of age ranges, this semantic
+    // evidence outranks generic speech/assessment detection and branch probing.
+    const ageRangeOptions = (state?.group || []).map(option => {
+      const raw = (option.text || '').trim();
+      const normalized = raw.replace(/[–—]/g, '-');
+      const range = normalized.match(/(?:age\s*:\s*)?(\d{1,3})\s*-\s*(\d{1,3})/i);
+      const plus = normalized.match(/(?:age\s*:\s*)?(\d{1,3})\s*\+/i);
+      if (range) return { option, min: Number(range[1]), max: Number(range[2]), raw };
+      if (plus) return { option, min: Number(plus[1]), max: Infinity, raw };
+      return null;
+    }).filter(Boolean);
+
+    if (ageRangeOptions.length >= 2 && ageRangeOptions.length >= Math.ceil((state?.group?.length || 0) * 0.6)) {
+      const targetAge = 25;
+      const chosen = ageRangeOptions.find(item => targetAge >= item.min && targetAge <= item.max) || ageRangeOptions[0];
+      console.log(`Age-range choice page detected from answer options. Choosing the range containing age ${targetAge}:`, chosen.raw);
+      const beforeSignature = pageSignature(state);
+      const clicked = await safeCrawlerClick(
+        page.locator(`[data-auto-id="${chosen.option.id}"]`),
+        chosen.raw || 'age-range option'
+      );
+      if (!clicked) return { handled: true, advanced: false };
+      if (await waitForAdvancement(beforeSignature, 12000)) return { handled: true, advanced: true };
+
+      // Some funnels select the age card first and then reveal/enable Continue.
+      const afterSelection = await inspectPageNavigationSafe('age-range choice post-click');
+      const nav = await clickStrongNavigation(afterSelection, 'age-range selection navigation CTA');
+      if (nav.handled) return { handled: true, advanced: nav.advanced };
+      return { handled: true, advanced: false };
+    }
+
+'''
+          if 'Age-range choice page detected from answer options.' not in s:
+              s = s.replace(marker, marker + block, 1)
+          p.write_text(s)
+          PY
+          node --check funnel-crawler-multiscreen.js
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'No changes to commit.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add funnel-crawler-multiscreen.js
+          git commit -m 'Handle age-range card selection before input logic'
+          git push
