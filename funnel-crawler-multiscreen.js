@@ -328,6 +328,7 @@ function sanitizeUrl(rawUrl) {
   await refineOutputDirectoryFromFirstPage();
 
   const samePageVariantHashes = new Map();
+  const samePageSelectionVariantCaptured = new Set();
   function hashScreenshot(buffer) {
     return crypto.createHash('sha1').update(buffer).digest('hex');
   }
@@ -349,10 +350,14 @@ function sanitizeUrl(rawUrl) {
   }
   async function captureSamePageVisualVariant(screenNumber, reason) {
     if (!screenNumber) return null;
+    const key = String(screenNumber);
+    if (samePageSelectionVariantCaptured.has(key)) {
+      console.log(`Selection-state screenshot already captured for ${String(screenNumber).padStart(2, '0')}. Skipping additional selected/unselected visual variants.`);
+      return null;
+    }
     await page.waitForTimeout(500);
     const buffer = await screenshotBufferNavigationSafe('same-page visual state screenshot');
     const hash = hashScreenshot(buffer);
-    const key = String(screenNumber);
     const seen = samePageVariantHashes.get(key) || new Set();
     if (seen.has(hash)) return null;
     const filename = nextFreeLetteredFilename(screenNumber);
@@ -360,7 +365,8 @@ function sanitizeUrl(rawUrl) {
     fs.writeFileSync(filename, buffer);
     seen.add(hash);
     samePageVariantHashes.set(key, seen);
-    console.log(`Captured ${path.basename(filename)} because the page changed visually without advancing${reason ? `: ${reason}` : '.'}`);
+    samePageSelectionVariantCaptured.add(key);
+    console.log(`Captured ${path.basename(filename)} as the single representative selection-state screenshot${reason ? `: ${reason}` : '.'}`);
     return filename;
   }
   function answerOutcomeAffinity(answerTexts, landingText) {
@@ -2766,6 +2772,18 @@ function sanitizeUrl(rawUrl) {
     return { advanced: false, landingState: state, reason: 'submit-failed', selected };
   }
 
+  function sameQuestionIgnoringSelectionVisuals(originalState, currentState) {
+    if (!originalState || !currentState) return false;
+    const originalPrompt = questionPromptFingerprint(originalState);
+    const currentPrompt = questionPromptFingerprint(currentState);
+    if (!originalPrompt || !currentPrompt || contextSimilarity(originalPrompt, currentPrompt) < 0.82) return false;
+    const originalOptions = uniqueAnswerOptions(originalState.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+    const currentOptions = uniqueAnswerOptions(currentState.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+    if (originalOptions.length < 2 || currentOptions.length < 2) return false;
+    const overlap = originalOptions.filter(text => currentOptions.includes(text)).length;
+    return overlap >= Math.max(2, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.7));
+  }
+
   async function exploreMultiSelectBranches(state, screenNumber, instruction) {
     const uniqueOptions = uniqueAnswerOptions(state.group);
     const optionTexts = uniqueOptions.map(x => (x.text || '').trim()).filter(Boolean);
@@ -2795,6 +2813,11 @@ function sanitizeUrl(rawUrl) {
       if (setIndex > 0) {
         const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
         if (!restored) {
+          const currentState = await inspectPageNavigationSafe('multi-select restore-failure identity check').catch(() => null);
+          if (sameQuestionIgnoringSelectionVisuals(state, currentState)) {
+            console.log('Restore verification was strict, but this is still the same multi-select question. Selection styling will not become another numbered page.');
+            return false;
+          }
           console.log('Multi-select branch question could not be restored. Preserving the current landing page for the next numbered screenshot instead of interacting with it before capture.');
           return true;
         }
@@ -2852,6 +2875,11 @@ function sanitizeUrl(rawUrl) {
 
     const restored = await restoreQuestionPage(questionUrl, optionTexts, questionFingerprint);
     if (!restored) {
+      const currentState = await inspectPageNavigationSafe('multi-select final restore identity check').catch(() => null);
+      if (sameQuestionIgnoringSelectionVisuals(state, currentState)) {
+        console.log('The multi-select source question is still the same page despite selected/unselected styling. It will not receive a new numbered screenshot.');
+        return false;
+      }
       console.log('Could not restore the multi-select source question after comparison. Preserving the current landing page for the next numbered screenshot.');
       return true;
     }
