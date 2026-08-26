@@ -1,0 +1,41 @@
+name: Apply startup navigation fix v2
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Patch startup navigation
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('funnel-crawler-multiscreen.js')
+          s = p.read_text()
+          old = "  await page.goto(url, { waitUntil: 'networkidle' });\n"
+          new = '''  // Startup must not depend on networkidle. Many funnels keep analytics,\n  // tracking, streaming, or API requests alive indefinitely. Use DOM readiness\n  // and then let the crawler's own settling/actionability checks decide when\n  // the first screen is ready.\n  try {\n    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });\n  } catch (error) {\n    // If navigation committed to a real page, continue instead of killing the\n    // crawl just because the load event did not fully settle.\n    if (!page.url() || page.url() === 'about:blank') throw error;\n    console.log('Initial navigation timed out after commit; continuing with crawler readiness checks.');\n  }\n  await page.waitForTimeout(1500);\n'''
+          if old not in s:
+              if "waitUntil: 'domcontentloaded', timeout: 45000" in s:
+                  raise SystemExit(0)
+              raise SystemExit('networkidle startup marker not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          node --check funnel-crawler-multiscreen.js
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add funnel-crawler-multiscreen.js
+          git commit -m 'Stop waiting for networkidle on startup'
+          git push
