@@ -1,0 +1,96 @@
+name: Apply selection-state dedup fix
+
+on:
+  push:
+    paths:
+      - '.github/selection-state-dedup-trigger.txt'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Patch crawler and syntax check
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('funnel-crawler-multiscreen.js')
+          s = p.read_text()
+
+          old = "  const samePageVariantHashes = new Map();\n"
+          new = "  const samePageVariantHashes = new Map();\n  const samePageSelectionVariantCaptured = new Set();\n"
+          if 'const samePageSelectionVariantCaptured = new Set();' not in s:
+            if old not in s:
+              raise SystemExit('samePageVariantHashes marker missing')
+            s = s.replace(old, new, 1)
+
+          old = "  async function captureSamePageVisualVariant(screenNumber, reason) {\n    if (!screenNumber) return null;\n    await page.waitForTimeout(500);\n"
+          new = "  async function captureSamePageVisualVariant(screenNumber, reason) {\n    if (!screenNumber) return null;\n    const key = String(screenNumber);\n    if (samePageSelectionVariantCaptured.has(key)) {\n      console.log(`Selection-state screenshot already captured for ${String(screenNumber).padStart(2, '0')}. Skipping additional selected/unselected visual variants.`);\n      return null;\n    }\n    await page.waitForTimeout(500);\n"
+          if 'Selection-state screenshot already captured for' not in s:
+            if old not in s:
+              raise SystemExit('captureSamePageVisualVariant header missing')
+            s = s.replace(old, new, 1)
+
+          old = "    const key = String(screenNumber);\n    const seen = samePageVariantHashes.get(key) || new Set();\n    if (seen.has(hash)) return null;\n"
+          new = "    const seen = samePageVariantHashes.get(key) || new Set();\n    if (seen.has(hash)) return null;\n"
+          if old in s:
+            s = s.replace(old, new, 1)
+
+          old = "    fs.writeFileSync(filename, buffer);\n    seen.add(hash);\n    samePageVariantHashes.set(key, seen);\n    console.log(`Captured ${path.basename(filename)} because the page changed visually without advancing${reason ? `: ${reason}` : '.'}`);\n"
+          new = "    fs.writeFileSync(filename, buffer);\n    seen.add(hash);\n    samePageVariantHashes.set(key, seen);\n    samePageSelectionVariantCaptured.add(key);\n    console.log(`Captured ${path.basename(filename)} as the single representative selection-state screenshot${reason ? `: ${reason}` : '.'}`);\n"
+          if 'single representative selection-state screenshot' not in s:
+            if old not in s:
+              raise SystemExit('captureSamePageVisualVariant write block missing')
+            s = s.replace(old, new, 1)
+
+          # Add a lightweight question-identity helper for restore-failure cases.
+          marker = "  async function exploreMultiSelectBranches(state, screenNumber, instruction) {\n"
+          helper = r'''  function sameQuestionIgnoringSelectionVisuals(originalState, currentState) {
+    if (!originalState || !currentState) return false;
+    const originalPrompt = questionPromptFingerprint(originalState);
+    const currentPrompt = questionPromptFingerprint(currentState);
+    if (!originalPrompt || !currentPrompt || contextSimilarity(originalPrompt, currentPrompt) < 0.82) return false;
+    const originalOptions = uniqueAnswerOptions(originalState.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+    const currentOptions = uniqueAnswerOptions(currentState.group || []).map(x => (x.text || '').trim().toLowerCase()).filter(Boolean);
+    if (originalOptions.length < 2 || currentOptions.length < 2) return false;
+    const overlap = originalOptions.filter(text => currentOptions.includes(text)).length;
+    return overlap >= Math.max(2, Math.ceil(Math.min(originalOptions.length, currentOptions.length) * 0.7));
+  }
+
+'''
+          if 'function sameQuestionIgnoringSelectionVisuals' not in s:
+            if marker not in s:
+              raise SystemExit('exploreMultiSelectBranches marker missing')
+            s = s.replace(marker, helper + marker, 1)
+
+          old = "        if (!restored) {\n          console.log('Multi-select branch question could not be restored. Preserving the current landing page for the next numbered screenshot instead of interacting with it before capture.');\n          return true;\n        }\n"
+          new = "        if (!restored) {\n          const currentState = await inspectPageNavigationSafe('multi-select restore-failure identity check').catch(() => null);\n          if (sameQuestionIgnoringSelectionVisuals(state, currentState)) {\n            console.log('Restore verification was strict, but the original multi-select question is still visibly present. Treating selected/unselected styling as the same page and returning to normal handling without creating a new numbered screenshot.');\n            return false;\n          }\n          console.log('Multi-select branch question could not be restored. Preserving the current landing page for the next numbered screenshot instead of interacting with it before capture.');\n          return true;\n        }\n"
+          if 'Restore verification was strict, but the original multi-select question is still visibly present.' not in s:
+            if old not in s:
+              raise SystemExit('multi-select restore-failure block missing')
+            s = s.replace(old, new, 1)
+
+          old = "    if (!restored) {\n      console.log('Could not restore the multi-select source question after comparison. Preserving the current landing page for the next numbered screenshot.');\n      return true;\n    }\n"
+          new = "    if (!restored) {\n      const currentState = await inspectPageNavigationSafe('multi-select final restore identity check').catch(() => null);\n      if (sameQuestionIgnoringSelectionVisuals(state, currentState)) {\n        console.log('The multi-select source question is still the same page despite selection styling differences. Continuing without assigning it another numbered screenshot.');\n        return false;\n      }\n      console.log('Could not restore the multi-select source question after comparison. Preserving the current landing page for the next numbered screenshot.');\n      return true;\n    }\n"
+          if 'The multi-select source question is still the same page despite selection styling differences.' not in s:
+            if old not in s:
+              raise SystemExit('multi-select final restore block missing')
+            s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+          node --check funnel-crawler-multiscreen.js
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add funnel-crawler-multiscreen.js
+          if git diff --cached --quiet; then
+            echo "No crawler changes needed"
+          else
+            git commit -m "Deduplicate multi-select selection-state screenshots"
+            git push origin main
+          fi
