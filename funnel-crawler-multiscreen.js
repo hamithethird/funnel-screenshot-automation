@@ -255,7 +255,7 @@ function sanitizeUrl(rawUrl) {
 
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
-  await page.goto(url, { waitUntil: 'networkidle' });
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
 
 
   function deriveBrandName(rawUrl) {
