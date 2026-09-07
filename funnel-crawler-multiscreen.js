@@ -2666,15 +2666,10 @@ function sanitizeUrl(rawUrl) {
       if (matched) return matched;
     } catch {}
 
-    // Direct navigation is the last resort only. It is accepted only if the exact
-    // original question prompt + answer set can be verified after loading.
-    try {
-      console.log('Browser history did not restore the question. Trying the saved question URL as a last resort.');
-      await page.goto(questionUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-      const matched = await inspectAndMatch(1000);
-      if (matched) return matched;
-    } catch {}
-
+    // Never reload the saved question URL on the live SPA session. Many funnels
+    // keep progress outside the URL; page.goto(questionUrl) can silently restart
+    // onboarding from page 1 even when the URL is unchanged.
+    console.log('Browser history did not restore the question. Direct URL restoration is disabled in forward-only safety mode.');
     console.log('Unable to restore the exact original branch question safely.');
     return null;
   }
@@ -3903,7 +3898,19 @@ function sanitizeUrl(rawUrl) {
     }
   }
 
+  // SAFETY: the primary crawl is forward-only. Branch probing used to mutate
+  // the live SPA session, then call Back/goBack/page.goto to restore earlier
+  // questions. On stateful funnels that can reset progress to page 1 and can also
+  // consume/skips screens before the numbered capture loop sees them. Keep branch
+  // discovery disabled on the live page until it runs in an isolated checkpointed
+  // context. Same-page selection/popup capture still works through handleAnswerGroup.
+  const LIVE_BRANCH_PROBING_ENABLED = false;
+
   const MAX_SCREENS = 100;
+  const numberedPageHistory = new Map();
+  let lastNumberedFingerprint = '';
+  let lastNumberedUrl = '';
+
   for (let screenNumber = 1; screenNumber <= MAX_SCREENS; screenNumber++) {
     await waitForVisualSettle();
     await dismissBlockingConsentOverlay();
@@ -3926,6 +3933,22 @@ function sanitizeUrl(rawUrl) {
         skipNextNumberedFingerprint = null;
       }
     }
+
+    const numberedFingerprint = normalizeContextText(state.pageText || '');
+    const numberedUrl = sanitizeUrl(page.url());
+    const numberedKey = `${numberedUrl}::${numberedFingerprint}`;
+    const previousScreen = numberedPageHistory.get(numberedKey);
+    if (previousScreen && previousScreen < screenNumber - 1) {
+      console.log(`RESET GUARD: current page matches previously captured screen ${String(previousScreen).padStart(2, '0')}. The funnel appears to have jumped backward/reset. Stopping before creating duplicate screenshots.`);
+      break;
+    }
+
+    // Same URL is normal for SPAs, so only treat an exact prior URL+content state as
+    // a reset. Consecutive identical states are allowed to reach the normal
+    // no-advancement check below rather than being mislabeled as a reset.
+    if (numberedFingerprint) numberedPageHistory.set(numberedKey, screenNumber);
+    lastNumberedFingerprint = numberedFingerprint;
+    lastNumberedUrl = numberedUrl;
 
     let paywallState = await inspectPaywallState();
     const filename = path.join(OUTPUT_DIR, `${String(screenNumber).padStart(2, '0')}.png`);
@@ -3989,8 +4012,10 @@ function sanitizeUrl(rawUrl) {
       const passiveGate = await handlePassiveEvaluationGate(state);
       if (passiveGate.handled) {
         acted = passiveGate.advanced;
-      } else if (state.group.length >= 2 && !isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state)) {
+      } else if (LIVE_BRANCH_PROBING_ENABLED && state.group.length >= 2 && !isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state)) {
         acted = await exploreAnswerBranches(state, screenNumber);
+      } else if (!LIVE_BRANCH_PROBING_ENABLED && state.group.length >= 2 && !isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state)) {
+        console.log('Forward-only safety mode: skipping destructive branch probing on the live funnel session. Taking the normal answer path instead.');
       } else if (state.group.length >= 2 && isSpeechInputScreen(state.pageText)) {
         console.log('Branch exploration skipped because this page genuinely requests spoken/audio input.');
       }
