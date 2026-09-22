@@ -575,90 +575,222 @@ function sanitizeUrl(rawUrl) {
   async function handleScratchReveal(screenNumber, state) {
     const probe = await page.evaluate(() => {
       const normalize = value => (value || '').toLowerCase().replace(/\s+/g, ' ').trim();
-      const bodyText = normalize(document.body.innerText || '');
+      const bodyText = normalize(document.body && document.body.innerText || '');
       const scratchWords = /\b(scratch|scratch to reveal|scratch here|reveal your|reveal discount|reveal offer|reveal prize|uncover|rub to reveal)\b/i;
       const pageSuggestsScratch = scratchWords.test(bodyText);
-      const candidates = Array.from(document.querySelectorAll('canvas, [class*="scratch" i], [id*="scratch" i], [aria-label*="scratch" i], [class*="reveal" i], [id*="reveal" i], [aria-label*="reveal" i], [class*="prize" i], [id*="prize" i]'));
+      const candidates = Array.from(document.querySelectorAll(
+        'canvas, [class*="scratch" i], [id*="scratch" i], [aria-label*="scratch" i], ' +
+        '[class*="reveal" i], [id*="reveal" i], [aria-label*="reveal" i], ' +
+        '[class*="prize" i], [id*="prize" i]'
+      ));
       const visible = candidates.map((el, index) => {
         const rect = el.getBoundingClientRect();
         const style = getComputedStyle(el);
-        const ok = rect.width >= 120 && rect.height >= 70 && rect.bottom > 0 && rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0;
+        const ok = rect.width >= 120 && rect.height >= 70 &&
+          rect.bottom > 0 && rect.right > 0 &&
+          style.display !== 'none' && style.visibility !== 'hidden' &&
+          Number(style.opacity) > 0 && style.pointerEvents !== 'none';
         if (!ok) return null;
-        const attrs = normalize([el.id, el.className && String(el.className), el.getAttribute('aria-label'), el.getAttribute('title')].filter(Boolean).join(' '));
+        const attrs = normalize([
+          el.id,
+          el.className && String(el.className),
+          el.getAttribute('aria-label'),
+          el.getAttribute('title')
+        ].filter(Boolean).join(' '));
         let score = 0;
         if (scratchWords.test(attrs)) score += 120;
-        if (el.tagName.toLowerCase() === 'canvas') score += 35;
-        if (pageSuggestsScratch) score += 60;
+        if (el.tagName.toLowerCase() === 'canvas') score += 40;
+        if (pageSuggestsScratch) score += 65;
         if (rect.width >= window.innerWidth * 0.45) score += 20;
         return { index, score };
       }).filter(Boolean).sort((a, b) => b.score - a.score);
+
       if (!visible.length || visible[0].score < 60) return null;
       const target = candidates[visible[0].index];
-      const id = `crawler-scratch-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+      const id = 'crawler-scratch-' + Date.now() + '-' + Math.floor(Math.random() * 1000000);
       target.setAttribute('data-crawler-scratch-id', id);
+      target.scrollIntoView({ block: 'center', inline: 'center' });
       return { id, score: visible[0].score };
     });
 
     if (!probe) return { handled: false, advanced: false };
-    console.log('Scratch/reveal interaction detected. Attempting to uncover the hidden offer.');
+    console.log('Scratch/reveal interaction detected. Attempting a full-coverage scratch.');
 
     const beforeState = state || await inspectPage();
     const beforeSignature = pageSignature(beforeState);
+    const beforeUrl = sanitizeUrl(page.url());
 
     if (currentNumberedCaptureSignature && beforeSignature !== currentNumberedCaptureSignature) {
       console.log('Scratch/reveal page appeared after the current numbered screenshot. Deferring interaction so its closed state is captured on the next numbered screen.');
       return { handled: true, advanced: true };
     }
 
-    const target = page.locator(`[data-crawler-scratch-id="${probe.id}"]`);
-    const box = await target.boundingBox().catch(() => null);
+    const target = page.locator('[data-crawler-scratch-id="' + probe.id + '"]');
+    await target.scrollIntoViewIfNeeded().catch(() => {});
+    await page.waitForTimeout(180);
+
+    let box = await target.boundingBox().catch(() => null);
     if (!box) return { handled: true, advanced: false };
 
-    const left = box.x + box.width * 0.12;
-    const right = box.x + box.width * 0.88;
-    const top = box.y + box.height * 0.18;
-    const bottom = box.y + box.height * 0.82;
-    const rows = 7;
+    const beforeVisual = await target.screenshot().catch(() => null);
 
-    try {
+    const scratchPass = async pass => {
+      box = await target.boundingBox().catch(() => box);
+      if (!box) return;
+      const left = box.x + box.width * 0.05;
+      const right = box.x + box.width * 0.95;
+      const top = box.y + box.height * 0.06;
+      const bottom = box.y + box.height * 0.94;
+
+      const rows = pass === 0 ? 14 : 18;
       for (let row = 0; row < rows; row++) {
         const y = top + ((bottom - top) * row / Math.max(rows - 1, 1));
         const startX = row % 2 === 0 ? left : right;
         const endX = row % 2 === 0 ? right : left;
         await page.mouse.move(startX, y);
         await page.mouse.down();
-        await page.mouse.move(endX, y, { steps: 18 });
+        await page.mouse.move(endX, y, { steps: 28 });
         await page.mouse.up();
-        await page.waitForTimeout(80);
+      }
+
+      const columns = pass === 0 ? 7 : 10;
+      for (let col = 0; col < columns; col++) {
+        const x = left + ((right - left) * col / Math.max(columns - 1, 1));
+        const startY = col % 2 === 0 ? top : bottom;
+        const endY = col % 2 === 0 ? bottom : top;
+        await page.mouse.move(x, startY);
+        await page.mouse.down();
+        await page.mouse.move(x, endY, { steps: 24 });
+        await page.mouse.up();
+      }
+
+      if (pass > 0) {
+        await page.mouse.move(left, top);
+        await page.mouse.down();
+        await page.mouse.move(right, bottom, { steps: 30 });
+        await page.mouse.up();
+        await page.mouse.move(right, top);
+        await page.mouse.down();
+        await page.mouse.move(left, bottom, { steps: 30 });
+        await page.mouse.up();
+      }
+    };
+
+    const clickScratchCompletionCTA = async () => {
+      const id = await page.evaluate(() => {
+        const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+        const positive = /^(?:continue|next|see|show|view|get|claim|unlock|reveal|open)(?:\s+.{0,55})?$/i;
+        const visible = el => {
+          const r = el.getBoundingClientRect();
+          const st = getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 &&
+            r.top < window.innerHeight && r.left < window.innerWidth &&
+            st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity) > 0 &&
+            st.pointerEvents !== 'none';
+        };
+        const candidates = [];
+        for (const el of Array.from(document.querySelectorAll('button, a, [role="button"], [onclick], [tabindex]'))) {
+          if (!visible(el)) continue;
+          const text = normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+          if (!positive.test(text)) continue;
+          if (/\b(back|previous|close|dismiss|no thanks|not now|buy|purchase|pay)\b/i.test(text)) continue;
+          const r = el.getBoundingClientRect();
+          candidates.push({ el, top: r.top, area: r.width * r.height, text });
+        }
+        candidates.sort((a, b) => b.top - a.top || b.area - a.area);
+        if (!candidates.length) return null;
+        const chosen = candidates[0];
+        const id = 'crawler-scratch-complete-' + Date.now() + '-' + Math.floor(Math.random() * 1000000);
+        chosen.el.setAttribute('data-crawler-scratch-complete-id', id);
+        chosen.el.scrollIntoView({ block: 'center', inline: 'center' });
+        return { id, text: chosen.text };
+      }).catch(() => null);
+      if (!id || !id.id) return false;
+      console.log('Post-scratch CTA detected:', id.text || '(no text)');
+      return await safeCrawlerClick(
+        page.locator('[data-crawler-scratch-complete-id="' + id.id + '"]'),
+        id.text || 'post-scratch CTA'
+      );
+    };
+
+    let visualChanged = false;
+    let afterState = beforeState;
+
+    try {
+      for (let pass = 0; pass < 3; pass++) {
+        console.log('Scratch coverage pass ' + (pass + 1) + '/3.');
+        await scratchPass(pass);
+        await page.waitForTimeout(550);
+
+        const currentVisual = await target.screenshot().catch(() => null);
+        if (beforeVisual && currentVisual && !beforeVisual.equals(currentVisual)) visualChanged = true;
+
+        afterState = await inspectPageNavigationSafe('post-scratch inspection').catch(() => beforeState);
+        const signatureChanged = pageSignature(afterState) !== beforeSignature;
+        const urlChanged = sanitizeUrl(page.url()) !== beforeUrl;
+        const paywallState = await inspectPaywallState().catch(() => ({ isPagePaywall: false }));
+
+        if (signatureChanged || urlChanged || paywallState.isPagePaywall) break;
+
+        const ctaClicked = await clickScratchCompletionCTA();
+        if (ctaClicked) {
+          if (await waitForAdvancement(beforeSignature, 10000)) {
+            afterState = await inspectPageNavigationSafe('post-scratch CTA landing').catch(() => afterState);
+            break;
+          }
+        }
       }
     } catch (error) {
-      console.log('Scratch gesture failed:', String(error?.message || error).split('\n')[0]);
+      console.log('Scratch gesture failed:', String(error && error.message || error).split('\n')[0]);
       return { handled: true, advanced: false };
     }
 
-    await page.waitForTimeout(900);
     await page.evaluate(() => {
-      const selection = window.getSelection?.();
+      const selection = window.getSelection && window.getSelection();
       if (selection) selection.removeAllRanges();
       const active = document.activeElement;
       if (active && typeof active.blur === 'function') active.blur();
     }).catch(() => {});
-    await page.waitForTimeout(120);
-    await waitForScreenshotReady({ minimumWaitMs: 700, maxWaitMs: 2600, pollMs: 250 });
-    const afterState = await inspectPage();
-    const changed = pageSignature(afterState) !== beforeSignature;
 
-    if (screenNumber !== null && changed) {
-      const revealFilename = path.join(OUTPUT_DIR, `${String(screenNumber).padStart(2, '0')}b.png`);
+    await page.waitForTimeout(300);
+    afterState = await inspectPageNavigationSafe('final scratch inspection').catch(() => afterState);
+    let changed = pageSignature(afterState) !== beforeSignature || sanitizeUrl(page.url()) !== beforeUrl;
+    let paywallState = await inspectPaywallState().catch(() => ({ isPagePaywall: false }));
+
+    if (screenNumber !== null && (changed || visualChanged || paywallState.isPagePaywall)) {
+      const revealFilename = path.join(OUTPUT_DIR, String(screenNumber).padStart(2, '0') + 'b.png');
       await page.screenshot({ path: revealFilename, fullPage: true });
-      console.log(`Captured scratch/reveal completed: ${revealFilename}`);
-      // Reserve a/b in the supplemental counter so later variants continue at c.
-      supplementalCounterByScreen.set(screenNumber, Math.max(supplementalCounterByScreen.get(screenNumber) || 0, 2));
+      console.log('Captured scratch/reveal completed: ' + revealFilename);
+      supplementalCounterByScreen.set(
+        screenNumber,
+        Math.max(supplementalCounterByScreen.get(screenNumber) || 0, 2)
+      );
     }
+
+    if (changed || paywallState.isPagePaywall) return { handled: true, advanced: true };
 
     const navigationResult = await clickStrongNavigation(afterState, 'post-scratch navigation CTA');
     if (navigationResult.handled) return navigationResult;
-    return { handled: true, advanced: changed };
+
+    const completionClicked = await clickScratchCompletionCTA();
+    if (completionClicked && await waitForAdvancement(beforeSignature, 12000)) {
+      return { handled: true, advanced: true };
+    }
+
+    if (visualChanged && box) {
+      console.log('Scratch surface changed but no CTA/navigation was detected. Trying one center tap on the revealed card.');
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2).catch(() => {});
+      if (await waitForAdvancement(beforeSignature, 8000)) {
+        return { handled: true, advanced: true };
+      }
+    }
+
+    console.log(
+      visualChanged
+        ? 'Scratch surface was visibly altered, but the funnel still did not expose a safe route to the next page.'
+        : 'Scratch surface did not visibly change after full-coverage gestures.'
+    );
+    return { handled: true, advanced: false };
   }
 
   async function handleEnglishLanguageChoice() {
@@ -3088,6 +3220,290 @@ function sanitizeUrl(rawUrl) {
     return true;
   }
 
+  async function inspectIsolatedBranchPage(probePage) {
+    return await probePage.evaluate(() => {
+      const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+      const visible = el => {
+        const r = el.getBoundingClientRect();
+        const st = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 &&
+          r.top < window.innerHeight && r.left < window.innerWidth &&
+          st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity) > 0;
+      };
+      const nav = /^(?:continue|next|proceed|submit|done|finish|start|see results?|get started|go on|keep going|move on|skip|not now|back|previous)$/i;
+      const selectors = 'button, a, label, [role="button"], [role="radio"], [role="option"], [role="checkbox"], [onclick], [tabindex]';
+      const seen = new Set();
+      const group = [];
+      for (const el of Array.from(document.querySelectorAll(selectors))) {
+        if (!visible(el)) continue;
+        const text = normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+        if (!text || text.length > 180 || nav.test(text)) continue;
+        const key = text.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        group.push({ text });
+      }
+      return {
+        pageText: normalize(document.body && document.body.innerText || ''),
+        group,
+        url: location.href
+      };
+    });
+  }
+
+  async function markIsolatedBranchOption(probePage, optionText) {
+    return await probePage.evaluate(wantedText => {
+      const normalize = value => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const wanted = normalize(wantedText);
+      const visible = el => {
+        const r = el.getBoundingClientRect();
+        const st = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 &&
+          st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity) > 0 &&
+          st.pointerEvents !== 'none';
+      };
+      const clickable = el => {
+        const st = getComputedStyle(el);
+        const role = el.getAttribute('role');
+        return ['BUTTON', 'A', 'LABEL'].includes(el.tagName) ||
+          ['button', 'radio', 'option', 'checkbox'].includes(role || '') ||
+          el.hasAttribute('onclick') || el.tabIndex >= 0 || st.cursor === 'pointer';
+      };
+      const matches = [];
+      for (const el of Array.from(document.querySelectorAll('body *'))) {
+        if (!visible(el)) continue;
+        const text = normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+        if (text !== wanted) continue;
+        const r = el.getBoundingClientRect();
+        matches.push({ el, area: r.width * r.height });
+      }
+      matches.sort((a, b) => a.area - b.area);
+      for (const item of matches) {
+        let target = item.el;
+        for (let depth = 0; target && target !== document.body && depth < 6; depth++, target = target.parentElement) {
+          if (!visible(target) || !clickable(target)) continue;
+          const id = 'crawler-isolated-branch-' + Date.now() + '-' + Math.floor(Math.random() * 1000000);
+          target.setAttribute('data-crawler-isolated-branch-id', id);
+          target.scrollIntoView({ block: 'center', inline: 'center' });
+          return id;
+        }
+      }
+      return null;
+    }, optionText).catch(() => null);
+  }
+
+  async function clickIsolatedNavigation(probePage) {
+    const id = await probePage.evaluate(() => {
+      const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+      const strong = /^(?:continue|next|proceed|submit|done|finish|start|see results?|get started|go on|keep going|move on)$/i;
+      const visible = el => {
+        const r = el.getBoundingClientRect();
+        const st = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 &&
+          r.top < window.innerHeight && r.left < window.innerWidth &&
+          st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity) > 0 &&
+          st.pointerEvents !== 'none';
+      };
+      const candidates = [];
+      for (const el of Array.from(document.querySelectorAll('button, a, [role="button"], [onclick], [tabindex]'))) {
+        if (!visible(el)) continue;
+        const text = normalize(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+        if (!strong.test(text)) continue;
+        const r = el.getBoundingClientRect();
+        candidates.push({ el, top: r.top, area: r.width * r.height });
+      }
+      candidates.sort((a, b) => b.top - a.top || b.area - a.area);
+      if (!candidates.length) return null;
+      const target = candidates[0].el;
+      const id = 'crawler-isolated-nav-' + Date.now() + '-' + Math.floor(Math.random() * 1000000);
+      target.setAttribute('data-crawler-isolated-nav-id', id);
+      target.scrollIntoView({ block: 'center', inline: 'center' });
+      return id;
+    }).catch(() => null);
+    if (!id) return false;
+    return await probePage.locator('[data-crawler-isolated-nav-id="' + id + '"]')
+      .click({ timeout: 6000 }).then(() => true).catch(() => false);
+  }
+
+  async function createIsolatedBranchCheckpoint(questionState) {
+    const context = page.context();
+    let storageState;
+    try {
+      storageState = await context.storageState({ indexedDB: true });
+    } catch {
+      storageState = await context.storageState();
+    }
+    const session = await page.evaluate(() => ({
+      origin: location.origin,
+      entries: Object.entries(sessionStorage)
+    })).catch(() => ({ origin: '', entries: [] }));
+    return {
+      url: page.url(),
+      storageState,
+      session,
+      questionFingerprint: questionPromptFingerprint(questionState),
+      optionTexts: uniqueAnswerOptions(questionState.group).map(x => (x.text || '').trim()).filter(Boolean)
+    };
+  }
+
+  async function probeIsolatedBranchOption(checkpoint, optionText) {
+    const probeContext = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      storageState: checkpoint.storageState
+    });
+    try {
+      const probePage = await probeContext.newPage();
+      if (checkpoint.session && checkpoint.session.origin) {
+        await probePage.addInitScript(data => {
+          try {
+            if (location.origin !== data.origin) return;
+            for (const entry of data.entries || []) sessionStorage.setItem(entry[0], entry[1]);
+          } catch {}
+        }, checkpoint.session);
+      }
+
+      await probePage.goto(checkpoint.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await probePage.waitForTimeout(1100);
+
+      const sourceState = await inspectIsolatedBranchPage(probePage);
+      const sourceOptions = (sourceState.group || []).map(x => canonicalAnswerText(x.text)).filter(Boolean);
+      const expectedOptions = checkpoint.optionTexts.map(canonicalAnswerText);
+      const overlap = expectedOptions.filter(text => sourceOptions.includes(text)).length;
+      const sourceFingerprint = questionPromptFingerprint(sourceState);
+      const promptMatch = checkpoint.questionFingerprint && sourceFingerprint
+        ? contextSimilarity(checkpoint.questionFingerprint, sourceFingerprint) >= 0.78
+        : true;
+      if (overlap < Math.min(2, expectedOptions.length) || !promptMatch) {
+        return { ok: false, reason: 'checkpoint did not reopen the same source question' };
+      }
+
+      const beforeFingerprint = normalizeContextText(sourceState.pageText || '');
+      const beforeUrl = sanitizeUrl(sourceState.url || checkpoint.url);
+      const optionId = await markIsolatedBranchOption(probePage, optionText);
+      if (!optionId) return { ok: false, reason: 'option not found in isolated copy' };
+
+      const clicked = await probePage.locator('[data-crawler-isolated-branch-id="' + optionId + '"]')
+        .click({ timeout: 7000 }).then(() => true).catch(() => false);
+      if (!clicked) return { ok: false, reason: 'isolated option click failed' };
+
+      await probePage.waitForTimeout(900);
+      let landingState = await inspectIsolatedBranchPage(probePage);
+
+      const stillSource = stateNow => {
+        const currentOptions = (stateNow.group || []).map(x => canonicalAnswerText(x.text)).filter(Boolean);
+        const optionOverlap = expectedOptions.filter(text => currentOptions.includes(text)).length;
+        const currentPrompt = questionPromptFingerprint(stateNow);
+        const samePrompt = checkpoint.questionFingerprint && currentPrompt
+          ? contextSimilarity(checkpoint.questionFingerprint, currentPrompt) >= 0.84
+          : false;
+        const sameText = normalizeContextText(stateNow.pageText || '') === beforeFingerprint;
+        const sameUrl = sanitizeUrl(stateNow.url || '') === beforeUrl;
+        return sameUrl && (sameText || (samePrompt && optionOverlap >= Math.min(2, expectedOptions.length)));
+      };
+
+      if (stillSource(landingState)) {
+        const navClicked = await clickIsolatedNavigation(probePage);
+        if (navClicked) {
+          await probePage.waitForTimeout(1000);
+          landingState = await inspectIsolatedBranchPage(probePage);
+        }
+      }
+
+      const startedAt = Date.now();
+      while (stillSource(landingState) && Date.now() - startedAt < 6000) {
+        await probePage.waitForTimeout(500);
+        landingState = await inspectIsolatedBranchPage(probePage);
+      }
+      if (stillSource(landingState)) return { ok: false, reason: 'isolated probe did not advance' };
+
+      await probePage.waitForTimeout(1300);
+      landingState = await inspectIsolatedBranchPage(probePage);
+      const fingerprint = normalizeContextText(landingState.pageText || '');
+      if (!fingerprint) return { ok: false, reason: 'isolated probe has no fingerprint' };
+      const screenshotBuffer = await probePage.screenshot({ fullPage: true });
+
+      return { ok: true, optionText, fingerprint, screenshotBuffer, landingState };
+    } catch (error) {
+      return { ok: false, reason: 'isolated probe error: ' + String(error && error.message || error).split('\n')[0] };
+    } finally {
+      await probeContext.close().catch(() => {});
+    }
+  }
+
+  async function exploreAnswerBranchesIsolated(state, screenNumber) {
+    const instruction = getSelectionInstruction(state.pageText);
+    if (instruction.minSelections !== 1 || (instruction.maxSelections !== null && instruction.maxSelections !== 1)) {
+      console.log('Forward-only branch mode: multi-select branch probing is skipped; taking the normal path.');
+      return false;
+    }
+    if (isNativeLanguageQuestion(state.pageText) || isNonBranchProfileQuestion(state.pageText)) return false;
+    if (isSpeechInputScreen(state.pageText) || hasSkipEscapeChoice(state)) return false;
+    if (await answerGroupIsInsideActiveModal(state)) return false;
+
+    const optionTexts = uniqueAnswerOptions(state.group).map(x => (x.text || '').trim()).filter(Boolean);
+    if (optionTexts.length < 2 || optionTexts.length > 10) return false;
+
+    console.log('Forward-only branch mode: testing all ' + optionTexts.length + ' answers in isolated browser contexts. The live funnel will not move backward.');
+    const checkpoint = await createIsolatedBranchCheckpoint(state);
+    const outcomes = [];
+
+    for (const optionText of optionTexts) {
+      const outcome = await probeIsolatedBranchOption(checkpoint, optionText);
+      if (!outcome.ok) {
+        console.log('Isolated branch probe skipped for "' + optionText + '": ' + outcome.reason);
+        continue;
+      }
+      outcomes.push(outcome);
+      console.log('Isolated branch outcome recorded for "' + optionText + '".');
+    }
+
+    if (outcomes.length < 2) {
+      console.log('Not enough isolated branch outcomes could be compared. Leaving the live funnel untouched and continuing normally.');
+      return false;
+    }
+
+    const uniqueOutcomes = uniqueBranchOutcomeGroups(outcomes);
+    if (uniqueOutcomes.length <= 1) {
+      console.log('All successfully tested answers led to the same immediate next page. No conditional page detected.');
+      return false;
+    }
+
+    console.log('Conditional branching confirmed safely: ' + uniqueOutcomes.length + ' distinct immediate next pages found without rewinding the live funnel.');
+
+    const conditionalQuestionOutcomes = uniqueOutcomes.filter(item => (item.landingState && item.landingState.group && item.landingState.group.length || 0) >= 2);
+    const conditionalTransitionOutcomes = uniqueOutcomes.filter(item => (item.landingState && item.landingState.group && item.landingState.group.length || 0) < 2);
+
+    for (const outcome of conditionalTransitionOutcomes) {
+      const filename = nextFreeLetteredFilename(screenNumber);
+      if (!filename) continue;
+      fs.writeFileSync(filename, outcome.screenshotBuffer);
+      console.log('Captured ' + path.basename(filename) + ' conditional transition for answer(s): ' + (outcome.answers || []).join(' | '));
+    }
+
+    if (conditionalQuestionOutcomes.length > 1) {
+      const canonicalQuestionOutcome =
+        conditionalQuestionOutcomes.find(item => (item.answers || []).includes(optionTexts[0])) ||
+        conditionalQuestionOutcomes[0];
+      const alternateQuestionOutcomes = conditionalQuestionOutcomes.filter(item => item !== canonicalQuestionOutcome);
+      console.log('Conditional next-question variants detected safely: ' + conditionalQuestionOutcomes.length + '. Saving ' + alternateQuestionOutcomes.length + ' alternate variant(s).');
+      for (const outcome of alternateQuestionOutcomes) {
+        const filename = nextFreeLetteredFilename(screenNumber + 1);
+        if (!filename) continue;
+        fs.writeFileSync(filename, outcome.screenshotBuffer);
+        console.log('Captured ' + path.basename(filename) + ' conditional next-question variant for answer(s): ' + (outcome.answers || []).join(' | '));
+      }
+    }
+
+    const canonicalTransition =
+      conditionalTransitionOutcomes.find(item => (item.answers || []).includes(optionTexts[0])) || null;
+    if (canonicalTransition) {
+      skipNextNumberedFingerprint = canonicalTransition.fingerprint;
+      console.log('The normal first-answer path is expected to land on a transition already captured above; its duplicate numbered screenshot will be skipped.');
+    }
+
+    return true;
+  }
+
   async function exploreAnswerBranches(state, screenNumber) {
     const instruction = getSelectionInstruction(state.pageText);
     if (isNativeLanguageQuestion(state.pageText)) return false;
@@ -3898,13 +4314,9 @@ function sanitizeUrl(rawUrl) {
     }
   }
 
-  // SAFETY: the primary crawl is forward-only. Branch probing used to mutate
-  // the live SPA session, then call Back/goBack/page.goto to restore earlier
-  // questions. On stateful funnels that can reset progress to page 1 and can also
-  // consume/skips screens before the numbered capture loop sees them. Keep branch
-  // discovery disabled on the live page until it runs in an isolated checkpointed
-  // context. Same-page selection/popup capture still works through handleAnswerGroup.
-  const LIVE_BRANCH_PROBING_ENABLED = false;
+  // SAFETY: the primary page remains forward-only. Conditional-answer testing
+  // happens only in disposable browser contexts cloned from the current checkpoint.
+  const ISOLATED_BRANCH_PROBING_ENABLED = true;
 
   const MAX_SCREENS = 100;
   const numberedPageHistory = new Map();
@@ -4012,10 +4424,10 @@ function sanitizeUrl(rawUrl) {
       const passiveGate = await handlePassiveEvaluationGate(state);
       if (passiveGate.handled) {
         acted = passiveGate.advanced;
-      } else if (LIVE_BRANCH_PROBING_ENABLED && state.group.length >= 2 && !isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state)) {
-        acted = await exploreAnswerBranches(state, screenNumber);
-      } else if (!LIVE_BRANCH_PROBING_ENABLED && state.group.length >= 2 && !isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state)) {
-        console.log('Forward-only safety mode: skipping destructive branch probing on the live funnel session. Taking the normal answer path instead.');
+      } else if (ISOLATED_BRANCH_PROBING_ENABLED && state.group.length >= 2 && !isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state)) {
+        // Probe alternates without mutating the live page. Keep acted=false so the
+        // untouched primary page then advances once on its normal path.
+        await exploreAnswerBranchesIsolated(state, screenNumber);
       } else if (state.group.length >= 2 && isSpeechInputScreen(state.pageText)) {
         console.log('Branch exploration skipped because this page genuinely requests spoken/audio input.');
       }
