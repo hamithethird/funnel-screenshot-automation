@@ -1008,6 +1008,7 @@ function sanitizeUrl(rawUrl) {
     if (!result) return false;
     console.log('Language-choice page detected. Preferring English. Languages found:', result.languages);
     if (result.inDialog) console.log('English option is inside the active modal/dialog.');
+
     const beforeState = await inspectPage();
     const beforeSignature = pageSignature(beforeState);
     const target = page.locator(`[data-language-choice-id="${result.id}"]`);
@@ -1016,23 +1017,82 @@ function sanitizeUrl(rawUrl) {
       console.log('English option was detected but is not safely reachable. Will not interact with controls behind the overlay.');
       return false;
     }
-    await page.waitForTimeout(700);
-    let afterState = await inspectPage();
-    if (pageSignature(afterState) !== beforeSignature) {
-      console.log('English language selected.');
-      if (afterState.cta) {
-        const beforeCTA = pageSignature(afterState);
-        const ctaClicked = await safeCrawlerClick(page.locator(`[data-auto-id="${afterState.cta.id}"]`), afterState.cta.text || 'language-choice CTA');
-        if (ctaClicked) await waitForAdvancement(beforeCTA, 7000);
-      }
+
+    // Radio/card selection pages often keep the exact same URL and visible text.
+    // The only change is checked state + an enabled Next button, so pageSignature()
+    // deliberately cannot be used as proof that the language step advanced.
+    await page.waitForTimeout(500);
+
+    // If selecting English auto-advanced, accept the real page change.
+    if (await waitForAdvancement(beforeSignature, 1800)) {
+      console.log('English language selected and the page auto-advanced.');
       return true;
     }
-    afterState = await inspectPage();
-    if (afterState.cta) {
-      const ctaClicked = await safeCrawlerClick(page.locator(`[data-auto-id="${afterState.cta.id}"]`), afterState.cta.text || 'language-choice CTA');
-      return ctaClicked;
+
+    const selected = await page.evaluate(() => {
+      const marked = document.querySelector('[data-language-choice-id]');
+      if (!marked) return false;
+      const truthy = value => ['true', 'checked', 'selected', 'on'].includes(String(value || '').toLowerCase());
+      if (marked.matches('input:checked')) return true;
+      if (truthy(marked.getAttribute('aria-checked')) || truthy(marked.getAttribute('aria-selected')) || truthy(marked.getAttribute('data-state'))) return true;
+      if (marked.querySelector('input:checked, [aria-checked="true"], [aria-selected="true"], [data-state="checked"], [data-state="selected"]')) return true;
+
+      let ancestor = marked.parentElement;
+      for (let depth = 0; ancestor && ancestor !== document.body && depth < 5; depth++, ancestor = ancestor.parentElement) {
+        if (ancestor.matches('input:checked')) return true;
+        if (truthy(ancestor.getAttribute('aria-checked')) || truthy(ancestor.getAttribute('aria-selected')) || truthy(ancestor.getAttribute('data-state'))) return true;
+        if (ancestor.querySelector('input:checked, [aria-checked="true"], [aria-selected="true"], [data-state="checked"], [data-state="selected"]')) return true;
+      }
+      return false;
+    }).catch(() => false);
+
+    if (selected) console.log('English language selected. Looking for the now-enabled navigation button.');
+
+    // EWA-style language screens enable a bottom Next button only after a radio
+    // choice is selected. Use the dedicated bottom-navigation finder and WAIT for
+    // advancement; returning immediately after click races the outer loop and made
+    // it think the crawler was still on the same page.
+    let afterState = await inspectPageNavigationSafe('language-choice post-selection inspection');
+    let navigationTarget = await findBottomNavigationFallback();
+
+    if (!navigationTarget && afterState.cta && isStrongNavigationText(afterState.cta.text || '')) {
+      navigationTarget = {
+        id: afterState.cta.id,
+        text: afterState.cta.text || 'language-choice CTA',
+        autoId: true
+      };
     }
-    return true;
+
+    if (navigationTarget) {
+      const navBefore = pageSignature(afterState);
+      const locator = navigationTarget.autoId
+        ? page.locator(`[data-auto-id="${navigationTarget.id}"]`)
+        : page.locator(`[data-bottom-navigation-id="${navigationTarget.id}"]`);
+      const ctaClicked = await safeCrawlerClick(
+        locator,
+        navigationTarget.text || 'language-choice CTA'
+      );
+      if (!ctaClicked) return false;
+
+      const advanced = await waitForAdvancement(navBefore, 12000);
+      if (advanced) {
+        console.log('English language selected and navigation completed.');
+        return true;
+      }
+
+      console.log('English was selected and Next was clicked, but the page did not advance.');
+      return false;
+    }
+
+    // Give SPAs one more short window in case the selected state triggers delayed
+    // navigation without a conventional button.
+    if (await waitForAdvancement(beforeSignature, 3500)) {
+      console.log('English language selected and delayed navigation completed.');
+      return true;
+    }
+
+    console.log('English language was selected, but no enabled Next/Continue control was found.');
+    return false;
   }
 
   async function inspectPaywallState() {
