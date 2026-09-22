@@ -3962,6 +3962,57 @@ function sanitizeUrl(rawUrl) {
   }
 
   async function handleExplicitAgeSelection(state) {
+    const targetAge = 25;
+    const ageIntentPattern = /\b(?:choose|select|pick)\s+(?:your\s+)?age\b|\bchoose\s+your\s+age\b|\bhow\s+old\s+are\s+you\b|\b(?:your\s+)?age\s+(?:group|range)\b/i;
+
+    const stateStillLooksLikeAgeStep = candidateState => {
+      if (!candidateState) return false;
+      const text = (candidateState.pageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      return ageIntentPattern.test(text);
+    };
+
+    const waitForLeavingAgeStep = async (beforeUrl, beforePrompt, timeoutMs = 12000) => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < timeoutMs) {
+        await page.waitForTimeout(400);
+        await silenceMedia();
+        const current = await inspectPageNavigationSafe('age-step advancement check').catch(() => null);
+        if (!current) continue;
+
+        const currentUrl = sanitizeUrl(page.url());
+        if (currentUrl !== beforeUrl) return true;
+
+        const currentPrompt = questionPromptFingerprint(current);
+        if (beforePrompt && currentPrompt && contextSimilarity(beforePrompt, currentPrompt) < 0.72) {
+          return true;
+        }
+
+        if (!stateStillLooksLikeAgeStep(current)) return true;
+      }
+      return false;
+    };
+
+    const pageText = (state?.pageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const explicitAgeIntent = !!pageText && ageIntentPattern.test(pageText);
+
+    // If this exact age step has already had a choice selected, many funnels keep
+    // the same URL/title and only enable a bottom Next button. Do NOT click the age
+    // option again: on radio-like implementations that can toggle the selection off
+    // and send the crawler back to the previously captured unselected state.
+    if (explicitAgeIntent && state?.cta && isStrongNavigationText(state.cta.text || '')) {
+      console.log('Age choice is already selected and navigation is available. Using:', state.cta.text || 'Next');
+      const beforeUrl = sanitizeUrl(page.url());
+      const beforePrompt = questionPromptFingerprint(state);
+      const clicked = await safeCrawlerClick(
+        page.locator(`[data-auto-id="${state.cta.id}"]`),
+        state.cta.text || 'age selection navigation CTA'
+      );
+      if (!clicked) return { handled: true, advanced: false };
+      const advanced = await waitForLeavingAgeStep(beforeUrl, beforePrompt, 12000);
+      if (!advanced) console.log('Age navigation CTA was clicked, but the crawler remained on the age step.');
+      return { handled: true, advanced };
+    }
+
     // Age can be a card/choice task, not only a writable numeric input.
     // If most answer choices are age ranges, choose the range containing age 25
     // before speech detection, branch probing, or numeric-input handling.
@@ -3993,7 +4044,6 @@ function sanitizeUrl(rawUrl) {
     }).filter(Boolean);
 
     if (ageRangeOptions.length >= 2 && ageRangeOptions.length >= Math.ceil((state?.group?.length || 0) * 0.6)) {
-      const targetAge = 25;
       const ageDistance = item => {
         if (targetAge >= item.min && targetAge <= item.max) return 0;
         if (targetAge < item.min) return item.min - targetAge;
@@ -4009,28 +4059,41 @@ function sanitizeUrl(rawUrl) {
           : `Age-range choice page detected from answer options. No bucket contains age ${targetAge}; choosing the nearest bucket instead:`,
         chosen.raw
       );
-      const beforeSignature = pageSignature(state);
+
+      const beforeUrl = sanitizeUrl(page.url());
+      const beforePrompt = questionPromptFingerprint(state);
       const clicked = await safeCrawlerClick(
         page.locator(`[data-auto-id="${chosen.option.id}"]`),
         chosen.raw || 'age-range option'
       );
       if (!clicked) return { handled: true, advanced: false };
-      if (await waitForAdvancement(beforeSignature, 12000)) return { handled: true, advanced: true };
-      const afterSelection = await inspectPageNavigationSafe('age-range choice post-click');
+
+      await page.waitForTimeout(500);
+      let afterSelection = await inspectPageNavigationSafe('age-range choice post-click');
+
+      // A changed text signature is NOT enough here: enabling "Next" changes body
+      // text while still remaining on the exact same age step.
+      const afterUrl = sanitizeUrl(page.url());
+      const afterPrompt = questionPromptFingerprint(afterSelection);
+      const actuallyLeftAgeStep =
+        afterUrl !== beforeUrl ||
+        (beforePrompt && afterPrompt && contextSimilarity(beforePrompt, afterPrompt) < 0.72) ||
+        !stateStillLooksLikeAgeStep(afterSelection);
+
+      if (actuallyLeftAgeStep) return { handled: true, advanced: true };
+
       const nav = await clickStrongNavigation(afterSelection, 'age-range selection navigation CTA');
-      if (nav.handled) return { handled: true, advanced: nav.advanced };
+      if (nav.handled) {
+        if (!nav.advanced) return { handled: true, advanced: false };
+        const leftAgeStep = await waitForLeavingAgeStep(beforeUrl, beforePrompt, 12000);
+        return { handled: true, advanced: leftAgeStep };
+      }
+
       return { handled: true, advanced: false };
     }
 
-    const pageText = (state?.pageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
-    if (!pageText) return { handled: false, advanced: false };
-
-    // Read the page intent before treating visible cards as generic answer choices.
-    // Only activate this handler when the title/subtitle explicitly asks for age.
-    const explicitAgeIntent = /\b(?:choose|select|pick)\s+(?:your\s+)?age\b|\bchoose\s+your\s+age\b|\bhow\s+old\s+are\s+you\b|\b(?:your\s+)?age\s+(?:group|range)\b/i.test(pageText);
     if (!explicitAgeIntent) return { handled: false, advanced: false };
 
-    const targetAge = 25;
     const candidate = await page.evaluate(({ targetAge }) => {
       const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
       const visible = el => {
@@ -4108,21 +4171,31 @@ function sanitizeUrl(rawUrl) {
 
     console.log(`Age-selection page detected from title/subtitle. Choosing the option that contains age ${targetAge}:`, candidate.text);
     const beforeState = await inspectPageNavigationSafe('age choice pre-click');
-    const beforeSignature = pageSignature(beforeState);
+    const beforeUrl = sanitizeUrl(page.url());
+    const beforePrompt = questionPromptFingerprint(beforeState);
     const clicked = await safeCrawlerClick(
       page.locator(`[data-crawler-age-choice-id="${candidate.id}"]`),
       `age option ${candidate.text}`
     );
     if (!clicked) return { handled: true, advanced: false };
 
-    if (await waitForAdvancement(beforeSignature, 12000)) {
-      return { handled: true, advanced: true };
-    }
-
-    // Some funnels only select the card first and reveal/enable a Continue CTA.
+    await page.waitForTimeout(500);
     const afterSelection = await inspectPageNavigationSafe('age choice post-click');
+    const afterUrl = sanitizeUrl(page.url());
+    const afterPrompt = questionPromptFingerprint(afterSelection);
+    const actuallyLeftAgeStep =
+      afterUrl !== beforeUrl ||
+      (beforePrompt && afterPrompt && contextSimilarity(beforePrompt, afterPrompt) < 0.72) ||
+      !stateStillLooksLikeAgeStep(afterSelection);
+
+    if (actuallyLeftAgeStep) return { handled: true, advanced: true };
+
     const nav = await clickStrongNavigation(afterSelection, 'age selection navigation CTA');
-    if (nav.handled) return { handled: true, advanced: nav.advanced };
+    if (nav.handled) {
+      if (!nav.advanced) return { handled: true, advanced: false };
+      const leftAgeStep = await waitForLeavingAgeStep(beforeUrl, beforePrompt, 12000);
+      return { handled: true, advanced: leftAgeStep };
+    }
 
     return { handled: true, advanced: false };
   }
