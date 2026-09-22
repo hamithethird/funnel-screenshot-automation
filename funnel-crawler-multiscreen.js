@@ -421,16 +421,19 @@ function sanitizeUrl(rawUrl) {
   }
 
   const BASE_RUN_EMAIL = 'REMOVED_EMAIL';
-  let runEmailSuffix = 0;
+  let activeRunEmail = BASE_RUN_EMAIL;
 
   function currentRunEmail() {
-    if (runEmailSuffix <= 0) return BASE_RUN_EMAIL;
-    return `REMOVED_EMAIL`;
+    return activeRunEmail;
   }
 
   function advanceRunEmail() {
-    runEmailSuffix += 1;
-    return currentRunEmail();
+    // After the normal address collides, generate a fresh unique address for this
+    // run. Avoid plus-addressing because some funnels reject '+' in email inputs.
+    const timestamp = Date.now().toString(36);
+    const randomPart = crypto.randomBytes(6).toString('hex');
+    activeRunEmail = `REMOVED_EMAIL`;
+    return activeRunEmail;
   }
 
   function generateRunPassword(length = 16) {
@@ -1952,6 +1955,13 @@ function sanitizeUrl(rawUrl) {
       if (!info || info.disabled || info.opacity < 0.35 || !info.reachable) continue;
       if (info.verticalGap < -24) continue;
 
+      // Legal/help/footer links can sit directly under the email field and score
+      // highly by proximity. They are not submission controls.
+      const formActionText = (info.text || '').trim();
+      if (/^(?:privacy(?: policy)?|terms(?: & conditions)?|terms and conditions|conditions|legal|cookie(?: policy)?|learn more|help|support)$/i.test(formActionText)) {
+        continue;
+      }
+
       let score = 0;
       if (info.sameForm) score += 320;
       if (info.sameExplicitPanel) score += 240;
@@ -2400,23 +2410,87 @@ function sanitizeUrl(rawUrl) {
   }
 
   async function emailAlreadyUsedDetected(input) {
-    const pageText = await page.evaluate(() => (document.body?.innerText || '').replace(/\s+/g, ' ').trim()).catch(() => '');
-    const validationMessage = await input.evaluate(el => el.validationMessage || '').catch(() => '');
-    const combined = `${pageText} ${validationMessage}`.toLowerCase();
-    return /(?:email|e-mail|account|user).{0,45}(?:already|exists|registered|taken|used|in use)|(?:already|exists|registered|taken|used|in use).{0,45}(?:email|e-mail|account|user)|duplicate (?:email|account|user)/i.test(combined);
+    const details = await input.evaluate(el => {
+      const texts = [];
+      const add = value => {
+        const text = (value || '').replace(/\s+/g, ' ').trim();
+        if (text) texts.push(text);
+      };
+
+      add(el.validationMessage || '');
+
+      const errorMessageId = el.getAttribute('aria-errormessage');
+      if (errorMessageId) {
+        const node = document.getElementById(errorMessageId);
+        if (node) add(node.innerText || node.textContent || '');
+      }
+
+      const describedBy = (el.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean);
+      for (const id of describedBy) {
+        const node = document.getElementById(id);
+        if (node) add(node.innerText || node.textContent || '');
+      }
+
+      let ancestor = el.parentElement;
+      for (let depth = 0; ancestor && depth < 6; depth++, ancestor = ancestor.parentElement) {
+        for (const node of ancestor.querySelectorAll(
+          '[role="alert"], [aria-live], [class*="error" i], [class*="invalid" i], [class*="message" i], [class*="helper" i], [class*="hint" i]'
+        )) {
+          add(node.innerText || node.textContent || '');
+        }
+      }
+
+      return texts.join(' | ');
+    }).catch(() => '');
+
+    const pageText = await page.evaluate(() => {
+      const parts = [];
+      const add = value => {
+        const text = (value || '').replace(/\s+/g, ' ').trim();
+        if (text) parts.push(text);
+      };
+
+      add(document.body?.innerText || '');
+
+      for (const node of document.querySelectorAll(
+        '[role="alert"], [aria-live], [class*="error" i], [class*="invalid" i], [class*="message" i], [class*="helper" i], [class*="hint" i]'
+      )) {
+        add(node.innerText || node.textContent || '');
+      }
+
+      return parts.join(' | ');
+    }).catch(() => '');
+
+    const combined = (pageText + ' ' + details).toLowerCase();
+    const patterns = [
+      /(?:email|e-mail).{0,100}(?:already|previously).{0,50}(?:used|taken|registered|exists|exist|in use|associated|linked)/i,
+      /(?:already|previously).{0,50}(?:used|taken|registered|exists|exist|in use|associated|linked).{0,100}(?:email|e-mail)/i,
+      /(?:account|user).{0,100}(?:already exists|already registered|already in use|already has)/i,
+      /(?:an?|this)\s+account\s+(?:with\s+this\s+email\s+)?already\s+exists/i,
+      /duplicate\s+(?:email|account|user)/i,
+      /email\s+(?:has\s+)?already\s+been\s+(?:used|taken|registered)/i,
+      /this\s+email\s+(?:is\s+)?(?:already\s+)?(?:used|taken|registered|in use)/i
+    ];
+
+    const matched = patterns.some(pattern => pattern.test(combined));
+    if (matched) console.log('Email collision message detected on the page.');
+    return matched;
   }
 
   async function retryWithNextEmailIfNeeded(input) {
     if (!(await emailAlreadyUsedDetected(input))) return null;
+
     const nextEmail = advanceRunEmail();
-    console.log(`Email is already registered/in use. Retrying with: ${nextEmail}`);
+    console.log(`Email collision detected. Generated a fresh random email: ${nextEmail}`);
+
     await input.fill(nextEmail);
     await input.evaluate(el => {
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       el.blur();
     });
-    await page.waitForTimeout(500);
+
+    await page.waitForTimeout(900);
     return nextEmail;
   }
 
@@ -3431,6 +3505,11 @@ function sanitizeUrl(rawUrl) {
   }
 
   async function exploreAnswerBranchesIsolated(state, screenNumber) {
+    if (await hasVisibleEditableInput()) {
+      console.log('Forward-only branch mode: editable form detected. Skipping branch probing for form controls/consent links.');
+      return false;
+    }
+
     const instruction = getSelectionInstruction(state.pageText);
     if (instruction.minSelections !== 1 || (instruction.maxSelections !== null && instruction.maxSelections !== 1)) {
       console.log('Forward-only branch mode: multi-select branch probing is skipped; taking the normal path.');
