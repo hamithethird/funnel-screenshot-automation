@@ -221,10 +221,110 @@ function sanitizeUrl(rawUrl) {
 }
 
 (async () => {
-  const url = process.argv[2];
+  const cliArgs = process.argv.slice(2);
+  const url = cliArgs[0];
   if (!url) {
     console.error('Please provide a URL.');
+    console.error('Usage: node funnel-crawler-multiscreen.js "URL" --vpn off|US|GB|DE|...');
     process.exit(1);
+  }
+
+  function readCliOption(name, fallback = null) {
+    const index = cliArgs.indexOf(name);
+    if (index < 0) return fallback;
+    const value = cliArgs[index + 1];
+    if (!value || value.startsWith('--')) {
+      console.error(`Missing value for ${name}.`);
+      process.exit(1);
+    }
+    return value;
+  }
+
+  function normalizeVpnCountry(rawValue) {
+    const value = String(rawValue || 'off').trim().toUpperCase();
+    if (value === 'OFF' || value === 'NONE' || value === 'NO') return 'OFF';
+    if (value === 'UK') return 'GB';
+    if (!/^[A-Z]{2}$/.test(value)) {
+      console.error('VPN country must be "off" or a two-letter country code such as US, GB, DE, FR, or TR.');
+      process.exit(1);
+    }
+    return value;
+  }
+
+  const VPN_COUNTRY = normalizeVpnCountry(readCliOption('--vpn', 'off'));
+  const VPN_ENABLED = VPN_COUNTRY !== 'OFF';
+
+  function buildOxylabsProxyConfig() {
+    if (!VPN_ENABLED) return null;
+
+    const rawUsername = (process.env.OXY_RES_USERNAME || '').trim();
+    const password = (process.env.OXY_RES_PASSWORD || '').trim();
+
+    if (!rawUsername || !password) {
+      console.error('VPN mode requires Oxylabs Residential Proxy credentials.');
+      console.error('Set OXY_RES_USERNAME and OXY_RES_PASSWORD in your Codespace/GitHub secrets.');
+      process.exit(1);
+    }
+
+    const baseUsername = rawUsername.replace(/^customer-/i, '');
+    const sessionId = crypto.randomBytes(8).toString('hex');
+    const username = `customer-${baseUsername}-cc-${VPN_COUNTRY}-sessid-${sessionId}-sesstime-30`;
+
+    return {
+      server: 'http://pr.oxylabs.io:7777',
+      username,
+      password
+    };
+  }
+
+  async function verifyOxylabsExitCountry(page, expectedCountry) {
+    console.log(`VPN mode: ON | Requested exit country: ${expectedCountry}`);
+    console.log('Verifying Oxylabs exit location before starting the funnel...');
+
+    const response = await page.goto('https://ip.oxylabs.io/location', {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000
+    });
+
+    if (!response || !response.ok()) {
+      throw new Error(`Oxylabs location verification failed with HTTP ${response ? response.status() : 'unknown'}.`);
+    }
+
+    const bodyText = (await page.locator('body').innerText().catch(() => '')).trim();
+    let locationData = null;
+    try {
+      locationData = JSON.parse(bodyText);
+    } catch {
+      throw new Error('Oxylabs location verification returned an unreadable response.');
+    }
+
+    const providerCountries = Object.values(locationData.providers || {})
+      .map(provider => String(provider?.country || '').trim().toUpperCase())
+      .filter(country => /^[A-Z]{2}$/.test(country));
+
+    if (!providerCountries.length) {
+      throw new Error('Oxylabs location verification did not report a country.');
+    }
+
+    const countryCounts = new Map();
+    for (const country of providerCountries) {
+      countryCounts.set(country, (countryCounts.get(country) || 0) + 1);
+    }
+    const detectedCountry = [...countryCounts.entries()]
+      .sort((a, b) => b[1] - a[1])[0][0];
+
+    const city = Object.values(locationData.providers || {})
+      .map(provider => String(provider?.city || '').trim())
+      .find(Boolean) || '';
+
+    console.log(`Oxylabs exit IP: ${locationData.ip || '(unknown)'}`);
+    console.log(`Detected exit country: ${detectedCountry}${city ? ` | City: ${city}` : ''}`);
+
+    if (detectedCountry !== expectedCountry) {
+      throw new Error(`VPN verification failed: requested ${expectedCountry}, but the exit IP was detected as ${detectedCountry}.`);
+    }
+
+    console.log('VPN verification: PASSED');
   }
 
   function deriveFunnelName(rawUrl) {
@@ -253,8 +353,26 @@ function sanitizeUrl(rawUrl) {
   let OUTPUT_DIR = createRunOutputDirectory(url);
   console.log('Saving screenshots to:', OUTPUT_DIR);
 
-  const browser = await chromium.launch();
+  const proxyConfig = buildOxylabsProxyConfig();
+  if (VPN_ENABLED) {
+    console.log(`VPN provider: Oxylabs Residential Proxies | Country: ${VPN_COUNTRY}`);
+  } else {
+    console.log('VPN mode: OFF | Using the normal Codespace connection.');
+  }
+
+  const browser = await chromium.launch(proxyConfig ? { proxy: proxyConfig } : {});
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+
+  if (VPN_ENABLED) {
+    try {
+      await verifyOxylabsExitCountry(page, VPN_COUNTRY);
+    } catch (error) {
+      console.error(error?.message || error);
+      await browser.close().catch(() => {});
+      process.exit(1);
+    }
+  }
+
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
 
 
