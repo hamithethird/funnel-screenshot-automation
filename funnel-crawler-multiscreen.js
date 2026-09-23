@@ -1306,8 +1306,10 @@ function sanitizeUrl(rawUrl) {
 
       const answerIds = new Set(bestGroup ? bestGroup.items.map(item => item.id) : []);
       let bestCTA = null;
+      const nonNavigationLinkText = /^(?:privacy(?: policy)?|terms(?: & conditions)?|terms and conditions|conditions of use|subscription policy|money-back(?: guarantee)?|docs?|faq|help|support|legal|cookie(?: policy)?)$/i;
       for (const item of controls) {
         if (item.answerControl || answerIds.has(item.id)) continue;
+        if (nonNavigationLinkText.test((item.text || '').trim())) continue;
         let score = 0;
         const centerY = item.top + item.height / 2;
         const widthRatio = item.width / vw;
@@ -4111,10 +4113,19 @@ function sanitizeUrl(rawUrl) {
     const targetAge = 25;
     const ageIntentPattern = /\b(?:choose|select|pick)\s+(?:your\s+)?age\b|\bchoose\s+your\s+age\b|\bhow\s+old\s+are\s+you\b|\b(?:your\s+)?age\s+(?:group|range)\b/i;
 
+    const pureAgeBucketPattern = /^(?:age\s*:?\s*)?(?:<\s*\d{1,3}|>\s*\d{1,3}|\d{1,3}\s*-\s*\d{1,3}|\d{1,3}\s*\+|\d{2}\s*'?s|(?:under|below|less than|over|above|older than)\s*\d{1,3})(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i;
+
     const stateStillLooksLikeAgeStep = candidateState => {
       if (!candidateState) return false;
       const text = (candidateState.pageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
-      return ageIntentPattern.test(text);
+      if (ageIntentPattern.test(text)) return true;
+
+      const uniqueTexts = uniqueAnswerOptions(candidateState.group || [])
+        .map(option => (option.text || '').replace(/[–—]/g, '-').replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+      if (uniqueTexts.length < 2) return false;
+      const ageLikeCount = uniqueTexts.filter(value => pureAgeBucketPattern.test(value)).length;
+      return ageLikeCount >= 2 && ageLikeCount >= Math.ceil(uniqueTexts.length * 0.6);
     };
 
     const waitForLeavingAgeStep = async (beforeUrl, beforePrompt, timeoutMs = 12000) => {
@@ -4171,8 +4182,7 @@ function sanitizeUrl(rawUrl) {
       // and "20+ push-ups". Those used to be misread as age buckets. When the page
       // itself does not explicitly ask for age, only accept labels whose ENTIRE
       // text has the shape of an age bucket.
-      const pureAgeLabel = /^(?:age\s*:?\s*)?(?:<\s*\d{1,3}|>\s*\d{1,3}|\d{1,3}\s*-\s*\d{1,3}|\d{1,3}\s*\+|\d{2}\s*'?s|(?:under|below|less than|over|above|older than)\s*\d{1,3})(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i;
-      if (!explicitAgeIntent && !pureAgeLabel.test(normalized)) return null;
+      if (!explicitAgeIntent && !pureAgeBucketPattern.test(normalized)) return null;
 
       const range = normalized.match(/^(?:age\s*:?\s*)?(\d{1,3})\s*-\s*(\d{1,3})(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i);
       const plus = normalized.match(/^(?:age\s*:?\s*)?(\d{1,3})\s*\+(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i);
@@ -4241,6 +4251,13 @@ function sanitizeUrl(rawUrl) {
       if (nav.handled) {
         if (!nav.advanced) return { handled: true, advanced: false };
         const leftAgeStep = await waitForLeavingAgeStep(beforeUrl, beforePrompt, 12000);
+        return { handled: true, advanced: leftAgeStep };
+      }
+
+      console.log('Age option did not advance from its nested control and no Next/Continue CTA appeared. Retrying the containing age card once.');
+      const cardAdvanced = await clickAnswerCardFallback(chosen.raw || '', pageSignature(state));
+      if (cardAdvanced) {
+        const leftAgeStep = await waitForLeavingAgeStep(beforeUrl, beforePrompt, 8000);
         return { handled: true, advanced: leftAgeStep };
       }
 
@@ -4895,12 +4912,14 @@ function sanitizeUrl(rawUrl) {
     // outer loop distinguish "nothing changed" from "a real form step appeared".
     const beforeHadEditableInput = await hasVisibleEditableInput();
     let acted = false;
+    let interactionHandledBySpecialCase = false;
 
     // Read explicit page intent before generic branch exploration. A page whose
     // title/subtitle says to choose/select an age is a direct selection task, not
     // a conditional-branch experiment. We consistently choose the range containing 25.
     const explicitAgeChoice = await handleExplicitAgeSelection(state);
     if (explicitAgeChoice.handled) {
+      interactionHandledBySpecialCase = true;
       acted = explicitAgeChoice.advanced;
     } else {
       // Evaluation/loading screens can contain a small answer gate (for example
@@ -4908,6 +4927,7 @@ function sanitizeUrl(rawUrl) {
       // branch exploration on those controls.
       const passiveGate = await handlePassiveEvaluationGate(state);
       if (passiveGate.handled) {
+        interactionHandledBySpecialCase = true;
         acted = passiveGate.advanced;
       } else if (ISOLATED_BRANCH_PROBING_ENABLED && state.group.length >= 2 && !isSpeechInputScreen(state.pageText) && !hasSkipEscapeChoice(state)) {
         // Probe alternates without mutating the live page. Keep acted=false so the
@@ -4917,7 +4937,7 @@ function sanitizeUrl(rawUrl) {
         console.log('Branch exploration skipped because this page genuinely requests spoken/audio input.');
       }
     }
-    if (!acted) {
+    if (!acted && !interactionHandledBySpecialCase) {
       const refreshedState = await inspectPage();
       acted = await advanceOneScreen(refreshedState, screenNumber);
     }
