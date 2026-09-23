@@ -1374,6 +1374,16 @@ function sanitizeUrl(rawUrl) {
   }
 
   async function clickStrongNavigation(state, description = 'primary navigation CTA') {
+    const consentState = await handleRequiredPageConsentCheckboxes();
+    if (consentState.found && !consentState.active) {
+      console.log('Required consent could not be activated. Navigation will not be attempted.');
+      return { handled: true, advanced: false };
+    }
+    if (consentState.changed) {
+      await page.waitForTimeout(350);
+      state = await inspectPageNavigationSafe('post-consent navigation inspection');
+    }
+
     const hasStrongCTA = state?.cta && isStrongNavigationText(state.cta.text);
     const fallback = await findBottomNavigationFallback();
     if (!hasStrongCTA && !fallback) return { handled: false, advanced: false };
@@ -1808,7 +1818,18 @@ function sanitizeUrl(rawUrl) {
       }
 
       if (afterSelection.cta) {
-        console.log('Minimum selection requirement satisfied. Using CTA:', afterSelection.cta.text || '(no text)');
+        const consentState = await handleRequiredPageConsentCheckboxes();
+        if (consentState.found && !consentState.active) {
+          console.log('Required consent could not be activated. Answer-group CTA will not be clicked.');
+          return false;
+        }
+        if (consentState.changed) {
+          await page.waitForTimeout(350);
+          afterSelection = await inspectPageNavigationSafe('answer-group post-consent inspection');
+        }
+
+        console.log('Minimum selection requirement satisfied. Using CTA:', afterSelection.cta?.text || '(no text)');
+        if (!afterSelection.cta) return false;
         const beforeCTA = pageSignature(afterSelection);
         const ctaClicked = await safeCrawlerClick(
           page.locator(`[data-auto-id="${afterSelection.cta.id}"]`),
@@ -1829,8 +1850,19 @@ function sanitizeUrl(rawUrl) {
       if (instruction.maxSelections && selectedKeys.size >= instruction.maxSelections) break;
     }
 
-    const finalState = await inspectPage();
+    let finalState = await inspectPage();
     if (selectedKeys.size >= minSelections && finalState.cta) {
+      const consentState = await handleRequiredPageConsentCheckboxes();
+      if (consentState.found && !consentState.active) {
+        console.log('Required consent could not be activated. Final answer-group CTA will not be clicked.');
+        return false;
+      }
+      if (consentState.changed) {
+        await page.waitForTimeout(350);
+        finalState = await inspectPageNavigationSafe('final answer-group post-consent inspection');
+      }
+      if (!finalState.cta) return false;
+
       const beforeCTA = pageSignature(finalState);
       const ctaClicked = await safeCrawlerClick(
         page.locator(`[data-auto-id="${finalState.cta.id}"]`),
@@ -1945,6 +1977,120 @@ function sanitizeUrl(rawUrl) {
       if (pageSignature(currentState) !== beforeSignature) return true;
     }
     return false;
+  }
+
+  async function handleRequiredPageConsentCheckboxes() {
+    const candidates = page.locator('input[type="checkbox"], [role="checkbox"]');
+    const count = await candidates.count();
+    if (!count) return { found: false, active: true, changed: false };
+
+    const bodyText = await page.evaluate(() =>
+      (document.body?.innerText || '').replace(/\s+/g, ' ').trim()
+    ).catch(() => '');
+
+    const pageExplicitlyRequiresConsent =
+      /\bconsent\s+(?:is\s+)?required\s+to\s+continue\b|\brequired\s+consent\b|\bplease\s+(?:provide|give|accept)\s+(?:your\s+)?consent\b/i.test(bodyText);
+
+    const marketingPattern = /\b(news|newsletter|updates?|offers?|promotions?|marketing|communications?|special offers?|products?\s*&?\s*services?)\b/i;
+    const acceptancePattern = /\b(i\s+)?(?:accept|agree|consent|authorize|authorise)\b/i;
+    const protectedConsentPattern = /\b(privacy|policy|terms?|conditions?|legal|processing|data|personal data|health data|onboarding data|information)\b/i;
+
+    let found = false;
+    let allActive = true;
+    let changed = false;
+
+    for (let i = 0; i < count; i++) {
+      const checkbox = candidates.nth(i);
+      if (!(await checkbox.isVisible().catch(() => false))) continue;
+
+      const getInfo = async () => await checkbox.evaluate(el => {
+        let labelText = '';
+        if (el.id) {
+          const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+          if (label) labelText = label.innerText || label.textContent || '';
+        }
+        if (!labelText) {
+          const parentLabel = el.closest('label');
+          if (parentLabel) labelText = parentLabel.innerText || parentLabel.textContent || '';
+        }
+        if (!labelText) labelText = el.getAttribute('aria-label') || '';
+        if (!labelText) {
+          let ancestor = el.parentElement;
+          let depth = 0;
+          while (ancestor && ancestor !== document.body && depth < 6) {
+            const checkboxCount = ancestor.querySelectorAll('input[type="checkbox"], [role="checkbox"]').length;
+            const text = (ancestor.innerText || ancestor.textContent || '').replace(/\s+/g, ' ').trim();
+            if (checkboxCount === 1 && text && text.length <= 500) {
+              labelText = text;
+              break;
+            }
+            ancestor = ancestor.parentElement;
+            depth++;
+          }
+        }
+
+        return {
+          text: labelText.replace(/\s+/g, ' ').trim().slice(0, 500),
+          checked: el.checked === true || el.getAttribute('aria-checked') === 'true',
+          required: el.required === true ||
+            el.getAttribute('required') !== null ||
+            el.getAttribute('aria-required') === 'true'
+        };
+      }).catch(() => null);
+
+      let info = await getInfo();
+      if (!info?.text) continue;
+
+      const isMarketing = marketingPattern.test(info.text);
+      const looksLikeExplicitConsent =
+        acceptancePattern.test(info.text) && protectedConsentPattern.test(info.text);
+      const shouldBeRequired =
+        !isMarketing &&
+        (info.required || looksLikeExplicitConsent || pageExplicitlyRequiresConsent);
+
+      if (!shouldBeRequired) continue;
+
+      found = true;
+      if (!info.checked) {
+        console.log('Required page consent checkbox detected. Activating:', info.text);
+        try {
+          const tag = await checkbox.evaluate(el => el.tagName.toLowerCase());
+          const type = ((await checkbox.getAttribute('type')) || '').toLowerCase();
+          if (tag === 'input' && type === 'checkbox') {
+            await checkbox.check({ force: false });
+          } else {
+            await checkbox.click({ force: false });
+          }
+        } catch {
+          try {
+            const clickedLabel = await checkbox.evaluate(el => {
+              let label = null;
+              if (el.id) label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+              label = label || el.closest('label');
+              if (!label) return false;
+              label.click();
+              return true;
+            });
+            if (!clickedLabel) await checkbox.click({ force: true }).catch(() => {});
+          } catch {
+            await checkbox.click({ force: true }).catch(() => {});
+          }
+        }
+
+        await page.waitForTimeout(450);
+        info = await getInfo();
+        changed = true;
+      }
+
+      if (info?.checked) {
+        console.log('Required page consent is active:', info.text);
+      } else {
+        allActive = false;
+        console.log('Required page consent is still NOT active:', info?.text || '(unknown consent)');
+      }
+    }
+
+    return { found, active: !found || allActive, changed };
   }
 
   async function handleRequiredAgreementCheckboxes(input) {
