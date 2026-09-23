@@ -4018,14 +4018,23 @@ function sanitizeUrl(rawUrl) {
     // before speech detection, branch probing, or numeric-input handling.
     const ageRangeOptions = (state?.group || []).map(option => {
       const raw = (option.text || '').trim();
-      const normalized = raw.replace(/[–—]/g, '-');
-      const range = normalized.match(/(?:age\s*:\s*)?(\d{1,3})\s*-\s*(\d{1,3})/i);
-      const plus = normalized.match(/(?:age\s*:\s*)?(\d{1,3})\s*\+/i);
-      const decade = normalized.match(/(?:age\s*:\s*)?(\d{2})\s*'?s\b/i);
-      const symbolicUnder = normalized.match(/^\s*<\s*(\d{1,3})\s*$/i);
-      const symbolicOver = normalized.match(/^\s*>\s*(\d{1,3})\s*$/i);
-      const wordUnder = normalized.match(/(?:under|below|less than)\s*(\d{1,3})/i);
-      const wordOver = normalized.match(/(?:over|above|older than)\s*(\d{1,3})/i);
+      const normalized = raw.replace(/[–—]/g, '-').replace(/\s+/g, ' ').trim();
+
+      // Do not infer "age" from arbitrary numeric answer labels. Questions such as
+      // "How many push-ups can you do?" legitimately contain "1-10", "11-20",
+      // and "20+ push-ups". Those used to be misread as age buckets. When the page
+      // itself does not explicitly ask for age, only accept labels whose ENTIRE
+      // text has the shape of an age bucket.
+      const pureAgeLabel = /^(?:age\s*:?\s*)?(?:<\s*\d{1,3}|>\s*\d{1,3}|\d{1,3}\s*-\s*\d{1,3}|\d{1,3}\s*\+|\d{2}\s*'?s|(?:under|below|less than|over|above|older than)\s*\d{1,3})(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i;
+      if (!explicitAgeIntent && !pureAgeLabel.test(normalized)) return null;
+
+      const range = normalized.match(/^(?:age\s*:?\s*)?(\d{1,3})\s*-\s*(\d{1,3})(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i);
+      const plus = normalized.match(/^(?:age\s*:?\s*)?(\d{1,3})\s*\+(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i);
+      const decade = normalized.match(/^(?:age\s*:?\s*)?(\d{2})\s*'?s(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i);
+      const symbolicUnder = normalized.match(/^(?:age\s*:?\s*)?<\s*(\d{1,3})(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i);
+      const symbolicOver = normalized.match(/^(?:age\s*:?\s*)?>\s*(\d{1,3})(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i);
+      const wordUnder = normalized.match(/^(?:age\s*:?\s*)?(?:under|below|less than)\s*(\d{1,3})(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i);
+      const wordOver = normalized.match(/^(?:age\s*:?\s*)?(?:over|above|older than)\s*(\d{1,3})(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i);
       if (range) return { option, min: Number(range[1]), max: Number(range[2]), raw };
       if (plus) return { option, min: Number(plus[1]), max: Infinity, raw };
       if (decade) {
