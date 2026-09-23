@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { getAgeQuestionEvidence } = require('../funnel-crawler-multiscreen');
+const { getAgeQuestionEvidence, shouldDeferAgeSelectionToForm } = require('../funnel-crawler-multiscreen');
 
 const page = (pageText, labels) => ({
   pageText,
@@ -19,6 +19,12 @@ test('an explicit age question accepts bare numeric ranges', () => {
     '18-24', '25-34', '35-44'
   ]));
   assert.equal(evidence.explicitAgeIntent, true);
+});
+
+test('an age question without choice cards can use manual numeric entry', () => {
+  assert.equal(shouldDeferAgeSelectionToForm({ pageText: 'What’s your age?', group: [], cta: null }), true);
+  assert.equal(shouldDeferAgeSelectionToForm(page('What’s your age?', ['18 - 29', '30 - 39'])), false);
+  assert.equal(shouldDeferAgeSelectionToForm(page('What is your goal weight?', [])), false);
 });
 
 test('BetterMe age cards with a curly apostrophe and repeated nested labels are an age question', () => {
