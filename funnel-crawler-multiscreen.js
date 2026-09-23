@@ -236,6 +236,10 @@ function getAgeQuestionEvidence(state) {
   return { explicitAgeIntent, hasAgeLabeledChoices };
 }
 
+function shouldDeferAgeSelectionToForm(state) {
+  return getAgeQuestionEvidence(state).explicitAgeIntent && !(state?.group?.length);
+}
+
 function sanitizeUrl(rawUrl) {
   try {
     const parsed = new URL(rawUrl);
@@ -4174,6 +4178,14 @@ async function runCrawler() {
 
     const { explicitAgeIntent, hasAgeLabeledChoices } = getAgeQuestionEvidence(state);
 
+    // A manual age form may have no answer cards at all. Give its editable
+    // control to the numeric profile handler before treating a CTA as proof
+    // that an age choice has already been made.
+    if (shouldDeferAgeSelectionToForm(state) && await hasVisibleEditableInput()) {
+      console.log('Age entry field detected; using the numeric age input handler.');
+      return { handled: false, advanced: false };
+    }
+
     // If this exact age step has already had a choice selected, many funnels keep
     // the same URL/title and only enable a bottom Next button. Do NOT click the age
     // option again: on radio-like implementations that can toggle the selection off
@@ -4357,6 +4369,10 @@ async function runCrawler() {
     }, { targetAge });
 
     if (!candidate) {
+      if (shouldDeferAgeSelectionToForm(state)) {
+        console.log('No age choice cards found; checking for a manual age input.');
+        return { handled: false, advanced: false };
+      }
       console.log('Age-selection intent detected, but no reachable option containing age 25 was found.');
       return { handled: true, advanced: false };
     }
@@ -4992,4 +5008,4 @@ async function runCrawler() {
 }
 
 if (require.main === module) runCrawler();
-module.exports = { getAgeQuestionEvidence, shouldFollowProfileContinue };
+module.exports = { getAgeQuestionEvidence, shouldDeferAgeSelectionToForm, shouldFollowProfileContinue };
