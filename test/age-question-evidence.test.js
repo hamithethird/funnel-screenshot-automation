@@ -21,6 +21,14 @@ test('an explicit age question accepts bare numeric ranges', () => {
   assert.equal(evidence.explicitAgeIntent, true);
 });
 
+test('BetterMe age cards with a curly apostrophe and repeated nested labels are an age question', () => {
+  const evidence = getAgeQuestionEvidence(page('My Profile What’s your age?', [
+    '18 - 29', '18 - 29', '30 - 39', '30 - 39',
+    '40 - 49', '40 - 49', '50+', '50+'
+  ]));
+  assert.equal(evidence.explicitAgeIntent, true);
+});
+
 test('age-labeled ranges identify an age question with a generic heading', () => {
   const evidence = getAgeQuestionEvidence(page('Select one option', [
     'Age 18-24', 'Age 25-34', 'Age 35-44'
