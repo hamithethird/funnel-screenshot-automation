@@ -150,6 +150,10 @@ function isStrongNavigationText(text) {
   return strongNavigationPattern.test((text || '').trim());
 }
 
+function shouldFollowProfileContinue(state, visibleFieldCount) {
+  return visibleFieldCount === 0 && !!state?.cta && isStrongNavigationText(state.cta.text);
+}
+
 function branchLetter(index) {
   let n = index;
   let out = '';
@@ -2620,6 +2624,14 @@ async function runCrawler() {
       editable.push(field);
     }
 
+    // Marketing/transition pages can mention "target weight" inside a phone
+    // mockup while offering only CONTINUE. Do not fill a hidden DOM input or
+    // capture fake weight variants when no visible field is available.
+    if (shouldFollowProfileContinue(state, editable.length)) {
+      console.log('Profile wording found without a visible input. Following the Continue CTA instead of a hidden form control.');
+      return { recognized: false, advanced: false };
+    }
+
     // Some funnels implement profile fields as custom React controls, hidden native
     // inputs, contenteditable nodes, or role=textbox/spinbutton elements. Once the
     // visible page intent says height/weight/age, do not give up simply because the
@@ -4980,4 +4992,4 @@ async function runCrawler() {
 }
 
 if (require.main === module) runCrawler();
-module.exports = { getAgeQuestionEvidence };
+module.exports = { getAgeQuestionEvidence, shouldFollowProfileContinue };
