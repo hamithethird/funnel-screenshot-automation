@@ -212,7 +212,7 @@ function questionPromptFingerprint(state) {
 }
 
 const pureAgeBucketPattern = /^(?:age\s*:?\s*)?(?:<\s*\d{1,3}|>\s*\d{1,3}|\d{1,3}\s*-\s*\d{1,3}|\d{1,3}\s*\+|\d{2}\s*'?s|(?:under|below|less than|over|above|older than)\s*\d{1,3})(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i;
-const ageIntentPattern = /\b(?:choose|select|pick)\s+(?:(?:your|an?)\s+)?age\b|\bhow\s+old\s+are\s+you\b|\bwhat(?:'s| is)\s+your\s+age\b|\b(?:your\s+)?age\s+(?:group|range)\b/i;
+const ageIntentPattern = /\b(?:choose|select|pick)\s+(?:(?:your|an?)\s+)?age\b|\bhow\s+old\s+are\s+you\b|\bwhat(?:['’]s| is)\s+your\s+age\b|\b(?:your\s+)?age\s+(?:group|range)\b/i;
 
 function hasAgeLabel(text) {
   const label = (text || '').replace(/[–—]/g, '-').replace(/\s+/g, ' ').trim();
