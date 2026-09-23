@@ -211,6 +211,27 @@ function questionPromptFingerprint(state) {
   return normalizeContextText(state.pageText || '', optionTexts);
 }
 
+const pureAgeBucketPattern = /^(?:age\s*:?\s*)?(?:<\s*\d{1,3}|>\s*\d{1,3}|\d{1,3}\s*-\s*\d{1,3}|\d{1,3}\s*\+|\d{2}\s*'?s|(?:under|below|less than|over|above|older than)\s*\d{1,3})(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i;
+const ageIntentPattern = /\b(?:choose|select|pick)\s+(?:(?:your|an?)\s+)?age\b|\bhow\s+old\s+are\s+you\b|\bwhat(?:'s| is)\s+your\s+age\b|\b(?:your\s+)?age\s+(?:group|range)\b/i;
+
+function hasAgeLabel(text) {
+  const label = (text || '').replace(/[–—]/g, '-').replace(/\s+/g, ' ').trim();
+  return pureAgeBucketPattern.test(label) &&
+    (/^age\s*:?\s*/i.test(label) || /\b(?:years?|yrs?)(?:\s+old)?$/i.test(label));
+}
+
+function getAgeQuestionEvidence(state) {
+  const pageText = (state?.pageText || '').replace(/\s+/g, ' ').trim();
+  const explicitAgeIntent = ageIntentPattern.test(pageText);
+  const uniqueLabels = [...new Set((state?.group || [])
+    .map(option => (option.text || '').replace(/[–—]/g, '-').replace(/\s+/g, ' ').trim().toLowerCase())
+    .filter(Boolean))];
+  const ageLabelCount = uniqueLabels.filter(hasAgeLabel).length;
+  const hasAgeLabeledChoices = uniqueLabels.length >= 2 &&
+    ageLabelCount >= 2 && ageLabelCount >= Math.ceil(uniqueLabels.length * 0.6);
+  return { explicitAgeIntent, hasAgeLabeledChoices };
+}
+
 function sanitizeUrl(rawUrl) {
   try {
     const parsed = new URL(rawUrl);
@@ -220,7 +241,7 @@ function sanitizeUrl(rawUrl) {
   }
 }
 
-(async () => {
+async function runCrawler() {
   const cliArgs = process.argv.slice(2);
   const url = cliArgs[0];
   if (!url) {
@@ -4111,21 +4132,11 @@ function sanitizeUrl(rawUrl) {
 
   async function handleExplicitAgeSelection(state) {
     const targetAge = 25;
-    const ageIntentPattern = /\b(?:choose|select|pick)\s+(?:your\s+)?age\b|\bchoose\s+your\s+age\b|\bhow\s+old\s+are\s+you\b|\b(?:your\s+)?age\s+(?:group|range)\b/i;
-
-    const pureAgeBucketPattern = /^(?:age\s*:?\s*)?(?:<\s*\d{1,3}|>\s*\d{1,3}|\d{1,3}\s*-\s*\d{1,3}|\d{1,3}\s*\+|\d{2}\s*'?s|(?:under|below|less than|over|above|older than)\s*\d{1,3})(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i;
 
     const stateStillLooksLikeAgeStep = candidateState => {
       if (!candidateState) return false;
-      const text = (candidateState.pageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
-      if (ageIntentPattern.test(text)) return true;
-
-      const uniqueTexts = uniqueAnswerOptions(candidateState.group || [])
-        .map(option => (option.text || '').replace(/[–—]/g, '-').replace(/\s+/g, ' ').trim())
-        .filter(Boolean);
-      if (uniqueTexts.length < 2) return false;
-      const ageLikeCount = uniqueTexts.filter(value => pureAgeBucketPattern.test(value)).length;
-      return ageLikeCount >= 2 && ageLikeCount >= Math.ceil(uniqueTexts.length * 0.6);
+      const evidence = getAgeQuestionEvidence(candidateState);
+      return evidence.explicitAgeIntent || evidence.hasAgeLabeledChoices;
     };
 
     const waitForLeavingAgeStep = async (beforeUrl, beforePrompt, timeoutMs = 12000) => {
@@ -4149,8 +4160,7 @@ function sanitizeUrl(rawUrl) {
       return false;
     };
 
-    const pageText = (state?.pageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
-    const explicitAgeIntent = !!pageText && ageIntentPattern.test(pageText);
+    const { explicitAgeIntent, hasAgeLabeledChoices } = getAgeQuestionEvidence(state);
 
     // If this exact age step has already had a choice selected, many funnels keep
     // the same URL/title and only enable a bottom Next button. Do NOT click the age
@@ -4177,12 +4187,10 @@ function sanitizeUrl(rawUrl) {
       const raw = (option.text || '').trim();
       const normalized = raw.replace(/[–—]/g, '-').replace(/\s+/g, ' ').trim();
 
-      // Do not infer "age" from arbitrary numeric answer labels. Questions such as
-      // "How many push-ups can you do?" legitimately contain "1-10", "11-20",
-      // and "20+ push-ups". Those used to be misread as age buckets. When the page
-      // itself does not explicitly ask for age, only accept labels whose ENTIRE
-      // text has the shape of an age bucket.
-      if (!explicitAgeIntent && !pureAgeBucketPattern.test(normalized)) return null;
+      // Bare numeric ranges also describe repetitions, time, or other quantities.
+      // When the question does not ask about age, require age-specific wording on
+      // most answer labels before choosing a bucket for the age-25 profile.
+      if (!explicitAgeIntent && (!hasAgeLabeledChoices || !hasAgeLabel(normalized))) return null;
 
       const range = normalized.match(/^(?:age\s*:?\s*)?(\d{1,3})\s*-\s*(\d{1,3})(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i);
       const plus = normalized.match(/^(?:age\s*:?\s*)?(\d{1,3})\s*\+(?:\s*(?:years?|yrs?)(?:\s*old)?)?$/i);
@@ -4969,4 +4977,7 @@ function sanitizeUrl(rawUrl) {
 
   await browser.close();
   console.log('Crawler finished.');
-})();
+}
+
+if (require.main === module) runCrawler();
+module.exports = { getAgeQuestionEvidence };
