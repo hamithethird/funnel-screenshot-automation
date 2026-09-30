@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+const { findEvaluationDropdown, chooseEvaluationDropdown } = require('./evaluation-select');
 const { rejectCookieOverlays, isCookieAcceptanceText, hasCookieContext, readCookieActionState } = require('./cookie-consent');
 const fs = require('fs');
 const path = require('path');
@@ -1214,6 +1215,8 @@ async function runCrawler() {
           el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || ''
         ).trim().replace(/\s+/g, ' ').slice(0, 100);
         const aria = (el.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ').slice(0, 100);
+        if (/^cookie(?:s)?(?: settings| preferences| policy)?$/i.test(text) ||
+            /^cookie(?:s)?(?: settings| preferences| policy)?$/i.test(aria)) return null;
         const mediaElement = tag === 'audio' || tag === 'video';
         const explicitMediaControl = mediaElement || mediaOnlyText.test(text) || mediaOnlyText.test(aria);
         if (explicitMediaControl && !answerControl) return null;
@@ -4377,39 +4380,38 @@ async function runCrawler() {
   }
 
   async function handlePassiveEvaluationGate(state) {
-    // Some evaluation/loading screens pause their automatic progress to ask a
-    // lightweight Yes/No-style question. This is not a branch question: the
-    // answer only unlocks/resumes the same passive evaluation sequence.
-    if (!state || state.group.length < 2) {
-      return { handled: false, advanced: false };
-    }
-
+    // Evaluation can pause for answer cards OR a dropdown. A select is not
+    // an answer group, so inspect it before requiring two card options.
+    if (!state) return { handled: false, advanced: false };
     const normalizedPageText = (state.pageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
-    const hasProgressPercent = /\b(?:[1-9]?\d|100)%\b/.test(normalizedPageText);
+    const hasProgressPercent = /(?:^|\s)(?:[1-9]?\d|100)%(?:\s|$)/.test(normalizedPageText);
     const evaluationLanguage = /\b(matching|analyzing|analysing|processing|loading|calculating|assessing|evaluating|scoring|preparing|building|creating|generating|personalizing|personalising|tailoring|compiling)\b/.test(normalizedPageText);
     const evaluationGateContext = isPassiveTransitionScreen(state.pageText) || (hasProgressPercent && evaluationLanguage);
-    if (!evaluationGateContext) {
-      return { handled: false, advanced: false };
-    }
+    if (!evaluationGateContext) return { handled: false, advanced: false };
 
-    const instruction = getSelectionInstruction(state.pageText);
-    if ((instruction.minSelections || 1) !== 1 || (instruction.maxSelections !== null && instruction.maxSelections !== 1)) {
-      return { handled: false, advanced: false };
-    }
-
-    const optionTexts = state.group.map(item => (item.text || '').trim()).filter(Boolean);
-    const shortChoiceGate = optionTexts.length <= 4 && optionTexts.every(text => text.length <= 80);
-    if (!shortChoiceGate) return { handled: false, advanced: false };
-
-    console.log('Passive evaluation gate detected. Selecting one answer to resume the evaluation; branch exploration is intentionally skipped.');
+    const dropdown = await findEvaluationDropdown(page);
     const beforeSignature = pageSignature(state);
     const beforeUrl = sanitizeUrl(page.url());
-    const option = state.group[0];
-    const clicked = await safeCrawlerClick(
-      page.locator(`[data-auto-id="${option.id}"]`),
-      option.text || 'passive evaluation answer'
-    );
-    if (!clicked) return { handled: true, advanced: false };
+    if (dropdown) {
+      const result = await chooseEvaluationDropdown(page, dropdown, safeCrawlerClick);
+      if (!result.selected) return { handled: result.handled, advanced: false };
+    } else {
+      if ((state.group || []).length < 2) return { handled: false, advanced: false };
+      const instruction = getSelectionInstruction(state.pageText);
+      if ((instruction.minSelections || 1) !== 1 || (instruction.maxSelections !== null && instruction.maxSelections !== 1)) {
+        return { handled: false, advanced: false };
+      }
+      const optionTexts = state.group.map(item => (item.text || '').trim()).filter(Boolean);
+      const shortChoiceGate = optionTexts.length <= 4 && optionTexts.every(text => text.length <= 80);
+      if (!shortChoiceGate) return { handled: false, advanced: false };
+      console.log('Passive evaluation gate detected. Selecting one answer to resume the evaluation; branch exploration is intentionally skipped.');
+      const option = state.group[0];
+      const clicked = await safeCrawlerClick(
+        page.locator(`[data-auto-id="${option.id}"]`),
+        option.text || 'passive evaluation answer'
+      );
+      if (!clicked) return { handled: true, advanced: false };
+    }
 
     // The answer may only remove the question while the progress animation keeps
     // running. Wait for the evaluation itself to finish instead of treating each
@@ -4427,6 +4429,17 @@ async function runCrawler() {
 
       if (urlChanged || !isPassiveTransitionScreen(current.pageText)) {
         console.log('Passive evaluation resumed and completed. Continuing to the resulting page.');
+        return { handled: true, advanced: true };
+      }
+
+      // Another gate can pause the same evaluation. Capture it on the next
+      // iteration instead of waiting 60 seconds for progress it is blocking.
+      const nextDropdown = await findEvaluationDropdown(page);
+      const nextChoices = (current.group || []).map(item => item.text).join('\n');
+      const previousChoices = (state.group || []).map(item => item.text).join('\n');
+      if ((nextDropdown && nextDropdown.id !== dropdown?.id) ||
+          ((current.group || []).length >= 2 && nextChoices !== previousChoices)) {
+        console.log('Evaluation reached another answer gate. Continuing so it can be captured and answered.');
         return { handled: true, advanced: true };
       }
 
