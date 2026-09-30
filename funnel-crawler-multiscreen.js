@@ -1,5 +1,5 @@
 const { chromium } = require('playwright');
-const { rejectCookieOverlays } = require('./cookie-consent');
+const { rejectCookieOverlays, isCookieAcceptanceText, hasCookieContext, readCookieActionState } = require('./cookie-consent');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -652,6 +652,12 @@ async function runCrawler() {
   async function safeCrawlerClick(locator, description = 'target') {
     await dismissBlockingConsentOverlay();
     await silenceMedia();
+    const cookieContext = await locator.evaluate(readCookieActionState, undefined, { timeout: 1500 }).catch(() => null);
+    if (cookieContext?.visible && hasCookieContext(cookieContext.ancestors) &&
+        isCookieAcceptanceText(cookieContext.ancestors[0]?.text)) {
+      console.log('Cookie acceptance blocked. The crawler only rejects cookies:', description);
+      return false;
+    }
     try {
       await locator.click({ timeout: 7000 });
       await silenceMedia();
