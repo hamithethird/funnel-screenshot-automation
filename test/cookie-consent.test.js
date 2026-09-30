@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { rejectCookieOverlays, isCookieRejectionText, hasCookieContext } = require('../cookie-consent');
+const { rejectCookieOverlays, isCookieRejectionText, isCookieAcceptanceText, hasCookieContext } = require('../cookie-consent');
 
 function fakePage(frameSpecs) {
   const clicked = [];
@@ -32,6 +32,9 @@ test('cookie text detects a banner with arbitrary CSS names', () => {
   assert.equal(isCookieRejectionText('  Reject   All  '), true);
   assert.equal(isCookieRejectionText('Tümünü reddet'), true);
   assert.equal(isCookieRejectionText('Accept All'), false);
+  assert.equal(isCookieAcceptanceText('Accept All'), true);
+  assert.equal(isCookieAcceptanceText('Reject All'), false);
+  assert.equal(isCookieAcceptanceText('Continue'), false);
 });
 
 test('a genuine funnel answer is untouched and an iframe cookie banner is rejected', async () => {

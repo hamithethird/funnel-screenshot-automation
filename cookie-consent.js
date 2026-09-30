@@ -6,6 +6,10 @@ function isCookieRejectionText(text) {
   return rejectionPattern.test(String(text || '').replace(/\s+/g, ' ').trim());
 }
 
+function isCookieAcceptanceText(text) {
+  return /^(?:accept(?: all| all cookies| cookies)?|allow(?: all| cookies)?|agree|i agree|consent|tümünü kabul et|kabul et|tout accepter|accepter|alle akzeptieren|akzeptieren|aceptar todo|aceptar|aceitar tudo|aceitar|accetta tutto|accetta)$/i.test(String(text || '').replace(/\s+/g, ' ').trim());
+}
+
 function hasCookieContext(ancestors) {
   return ancestors.some(item =>
     cookieIdentityPattern.test(`${item.id || ''} ${item.className || ''} ${item.label || ''}`) ||
@@ -21,7 +25,7 @@ function readCookieActionState(el) {
     const style = getComputedStyle(parent);
     if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) visible = false;
     ancestors.push({ id: parent.id, className: String(parent.className || ''),
-      label: parent.getAttribute('aria-label') || '', text: parent.innerText || '' });
+      label: parent.getAttribute('aria-label') || '', text: parent.innerText || parent.getAttribute('aria-label') || parent.getAttribute('value') || '' });
   }
   return { visible, ancestors };
 }
@@ -66,4 +70,4 @@ async function rejectCookieOverlays(page, { log = console.log, settleMs = 500 } 
   return rejected;
 }
 
-module.exports = { rejectCookieOverlays, isCookieRejectionText, hasCookieContext };
+module.exports = { rejectCookieOverlays, isCookieRejectionText, isCookieAcceptanceText, hasCookieContext, readCookieActionState };
