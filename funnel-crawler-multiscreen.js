@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+const { rejectCookieOverlays } = require('./cookie-consent');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -645,47 +646,7 @@ async function runCrawler() {
   }
 
   async function dismissBlockingConsentOverlay() {
-    const overlaySelectors = [
-      '[role="dialog"]', '[aria-modal="true"]', '.cky-modal', '.cky-modal-open',
-      '[class*="cookie"]', '[id*="cookie"]', '[class*="consent"]', '[id*="consent"]'
-    ];
-    const affirmativePatterns = [
-      /^accept all$/i, /^accept$/i, /^allow all$/i, /^allow$/i, /^agree$/i, /^i agree$/i,
-      /^consent$/i, /^ok$/i, /^okay$/i, /^got it$/i, /^tümünü kabul et$/i, /^kabul et$/i,
-      /^hepsini kabul et$/i, /^izin ver$/i, /^aceptar todo$/i, /^aceptar$/i, /^aceitar tudo$/i,
-      /^aceitar$/i, /^tout accepter$/i, /^accepter$/i, /^alle akzeptieren$/i, /^akzeptieren$/i,
-      /^accetta tutto$/i, /^accetta$/i
-    ];
-    const overlays = page.locator(overlaySelectors.join(','));
-    const overlayCount = await overlays.count();
-    for (let i = 0; i < overlayCount; i++) {
-      const overlay = overlays.nth(i);
-      if (!(await overlay.isVisible().catch(() => false))) continue;
-      const actions = overlay.locator('button, [role="button"], input[type="button"], input[type="submit"], a');
-      const actionCount = await actions.count();
-      for (let j = 0; j < actionCount; j++) {
-        const action = actions.nth(j);
-        if (!(await action.isVisible().catch(() => false))) continue;
-        const text = (
-          (await action.innerText().catch(() => '')) ||
-          (await action.getAttribute('aria-label')) ||
-          (await action.getAttribute('value')) || ''
-        ).trim().replace(/\s+/g, ' ');
-        if (!affirmativePatterns.some(pattern => pattern.test(text))) continue;
-        console.log('Blocking consent modal detected. Dismissing with:', text);
-        try {
-          await action.click({ timeout: 5000 });
-        } catch {
-          continue;
-        }
-        await page.waitForTimeout(500);
-        if (!(await overlay.isVisible().catch(() => false))) {
-          console.log('Blocking consent modal dismissed.');
-          return true;
-        }
-      }
-    }
-    return false;
+    return await rejectCookieOverlays(page);
   }
 
   async function safeCrawlerClick(locator, description = 'target') {
@@ -1451,6 +1412,7 @@ async function runCrawler() {
 
   async function waitForScreenshotReady({ minimumWaitMs = 2200, maxWaitMs = 5500, pollMs = 300 } = {}) {
     await page.waitForTimeout(minimumWaitMs);
+    await dismissBlockingConsentOverlay();
     let previous = null;
     let stableCount = 0;
     const startedAt = Date.now();
