@@ -5119,7 +5119,7 @@ async function runCrawler() {
     // content into place after the first DOM/text snapshot is stable.
     // Apply a dedicated 3s hold only to recognizable visual transition pages.
     if (!paywallState.isPagePaywall && (
-      /\\b(?:your (?:personalized |personalised )?plan is ready|(?:learning|fitness|weight loss) growth|building your plan|plan is (?:almost )?ready)\\b/i.test(state.pageText || '') ||
+      /\b(?:your (?:personalized |personalised )?plan is ready|(?:learning|fitness|weight loss) growth|building your plan|plan is (?:almost )?ready)\b/i.test(state.pageText || '') ||
       (isPassiveTransitionScreen(state.pageText || '') &&
         !(await hasVisibleEditableInput()) && (state.group?.length || 0) === 0)
     )) {
