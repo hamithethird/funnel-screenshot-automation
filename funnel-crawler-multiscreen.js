@@ -2205,56 +2205,76 @@ async function runCrawler() {
     }, { explicitlyRequired: pageInfo.explicitlyRequired }).catch(() => null);
 
     if (!custom && pageInfo.explicitlyRequired) {
-      // Fallback for layouts with an unlabelled visual square next to legal copy.
-      // Find the legal sentence's text geometry and the checkbox immediately to
-      // its left; do not guess based on the site name or click legal links.
-      const geometric = await page.evaluate(() => {
-        const norm = text => String(text || '').replace(/\\s+/g, ' ').trim();
-        const legal = /\\b(privacy\\s+policy|terms(?:\\s+(?:and|&)\\s+conditions)?|legal\\s+agreement|data\\s+processing|policy)\\b/i;
-        const accept = /\\b(agree|accept|consent|authorize|authorise)\\b/i;
-        const nodes = Array.from(document.querySelectorAll('p, span, label, div'));
-        for (const node of nodes) {
-          const text = norm(node.innerText);
-          if (!text || text.length > 350 || !legal.test(text) || !accept.test(text)) continue;
-          if (Array.from(node.children).some(child => {
-            const childText = norm(child.innerText);
-            return childText && legal.test(childText) && accept.test(childText);
-          })) continue;
-          const rect = node.getBoundingClientRect();
-          if (rect.width < 90 || rect.height < 12 || rect.top < 0 || rect.bottom > innerHeight) continue;
-          const row = node.parentElement;
-          if (!row) continue;
-          const rowRect = row.getBoundingClientRect();
-          if (rowRect.height > 160 || rowRect.width > innerWidth + 5) continue;
-          const y = Math.max(1, Math.min(innerHeight - 2, rect.top + Math.min(rect.height / 2, 22)));
-          for (const offset of [28, 34, 22, 40]) {
-            const x = rect.left - offset;
-            if (x < 2) continue;
-            const target = document.elementFromPoint(x, y);
-            if (!target || target.closest('a, button, input[type="submit"]')) continue;
-            const box = target.getBoundingClientRect();
-            if (box.width > 75 || box.height > 75 || box.width < 12 || box.height < 12) continue;
-            const id = 'crawler-policy-square-' + Math.random().toString(36).slice(2);
-            target.setAttribute('data-crawler-policy-square', id);
-            return { id, text };
+      // Custom agreements may have a bare square as a sibling of the text, with
+      // no checkbox role and no usable label association. Locate the smallest
+      // legal-text element first, then search its ancestor row for a visual box.
+      const candidate = await page.evaluate(() => {
+        const norm = text => String(text || '').replace(/\s+/g, ' ').trim();
+        const legal = /\b(privacy\s+policy|terms(?:\s+(?:and|&)\s+conditions)?|legal\s+agreement|data\s+processing|policy)\b/i;
+        const accept = /\b(agree|accept|consent|authorize|authorise)\b/i;
+        const visible = el => {
+          const r = el.getBoundingClientRect(), st = getComputedStyle(el);
+          return r.width >= 12 && r.height >= 12 && r.top >= 0 &&
+            r.bottom <= innerHeight && st.display !== 'none' &&
+            st.visibility !== 'hidden' && st.opacity !== '0';
+        };
+        const nodes = Array.from(document.querySelectorAll('p, span, label, div'))
+          .filter(el => {
+            const t = norm(el.innerText);
+            return t.length > 18 && t.length < 300 && legal.test(t) && accept.test(t) && visible(el);
+          }).sort((a,b) => a.getBoundingClientRect().height - b.getBoundingClientRect().height);
+        for (const label of nodes) {
+          const labelRect = label.getBoundingClientRect();
+          for (let row = label.parentElement, depth = 0; row && depth < 4; row = row.parentElement, depth++) {
+            const rr = row.getBoundingClientRect();
+            if (rr.height > 180 || rr.width > innerWidth + 5) continue;
+            const choices = Array.from(row.querySelectorAll('*')).filter(el => {
+              if (el === label || label.contains(el) || el.closest('a, button, input[type="submit"]')) return false;
+              if (!visible(el)) return false;
+              const r = el.getBoundingClientRect(), st = getComputedStyle(el);
+              return r.width >= 14 && r.width <= 60 && r.height >= 14 && r.height <= 60 &&
+                Math.abs(r.width-r.height) <= 15 && r.right <= labelRect.left + 18 &&
+                Math.abs((r.top + r.bottom)/2 - (labelRect.top + labelRect.bottom)/2) < 65 &&
+                (parseFloat(st.borderTopWidth) > 0 || parseFloat(st.borderLeftWidth) > 0 ||
+                 st.cursor === 'pointer' || /checkbox|check|consent/i.test(String(el.className)));
+            }).sort((x,y) => {
+              const xr=x.getBoundingClientRect(),yr=y.getBoundingClientRect();
+              return (Math.abs(xr.right-labelRect.left) + xr.width*xr.height/100) -
+                (Math.abs(yr.right-labelRect.left) + yr.width*yr.height/100);
+            });
+            if (!choices.length) continue;
+            const target = choices[0], id = 'crawler-required-agreement-' + Math.random().toString(36).slice(2);
+            target.setAttribute('data-crawler-required-agreement', id);
+            return { id, text: norm(label.innerText) };
           }
         }
         return null;
       }).catch(() => null);
-      if (geometric) {
-        const target = page.locator('[data-crawler-policy-square="' + geometric.id + '"]');
-        const alreadyClicked = await target.getAttribute('data-crawler-consent-activated').catch(() => null);
-        if (alreadyClicked === 'true') return { found: true, active: true, changed: false };
-        console.log('Required policy square found beside legal copy. Activating:', geometric.text);
-        const clicked = await safeCrawlerClick(target, 'required legal policy square');
+      if (candidate) {
+        const target = page.locator('[data-crawler-required-agreement="' + candidate.id + '"]');
+        console.log('Required legal checkbox candidate found:', candidate.text);
+        const clicked = await safeCrawlerClick(target, 'required policy checkbox');
         if (!clicked) return { found: true, active: false, changed: false };
-        await target.evaluate(el => el.setAttribute('data-crawler-consent-activated', 'true')).catch(() => {});
-        await page.waitForTimeout(350);
+        await page.waitForTimeout(450);
+        const validationStillVisible = await page.getByText(/accept\s+(?:the\s+)?(?:privacy\s+policy|terms|policy)\s+to\s+continue/i)
+          .first().isVisible().catch(() => false);
+        const checked = await target.evaluate(el => {
+          const root = el.parentElement;
+          return el.checked === true || el.getAttribute('aria-checked') === 'true' ||
+            /checked|selected/.test((el.getAttribute('data-state') || '').toLowerCase()) ||
+            (root && (root.querySelector('input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"]') !== null));
+        }).catch(() => false);
+        if (validationStillVisible && !checked) {
+          console.log('Agreement click attempted; validation remains and checked state could not be confirmed.');
+          return { found: true, active: false, changed: true };
+        }
+        console.log('Agreement candidate clicked; state:', checked ? 'checked' : 'validation absent');
         return { found: true, active: true, changed: true };
       }
       console.log('Required legal acceptance message detected, but no safe checkbox target was found.');
       return { found: true, active: false, changed: false };
     }
+
     if (!custom) return { found: false, active: true, changed: false };
     found = true;
 
