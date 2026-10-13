@@ -1982,73 +1982,81 @@ async function runCrawler() {
   }
 
   async function handleRequiredPageConsentCheckboxes() {
-    const candidates = page.locator('input[type="checkbox"], [role="checkbox"]');
-    const count = await candidates.count();
-    if (!count) return { found: false, active: true, changed: false };
+    const pageInfo = await page.evaluate(() => {
+      const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+      const bodyText = normalize(document.body?.innerText || '');
+      const requiredPattern =
+        /\bconsent\s+(?:is\s+)?required\s+to\s+continue\b|\brequired\s+consent\b|\bplease\s+(?:provide|give|accept)\s+(?:your\s+)?consent\b|\baccept\s+(?:the\s+)?(?:privacy\s+policy|terms?(?:\s+(?:and|&)?\s*conditions?)?)\s+to\s+continue\b|\bagree\s+(?:to\s+)?(?:the\s+)?(?:privacy\s+policy|terms?(?:\s+(?:and|&)?\s*conditions?)?)\s+to\s+continue\b|\bmust\s+(?:accept|agree|consent)\b/i;
+      return {
+        text: bodyText,
+        explicitlyRequired: requiredPattern.test(bodyText)
+      };
+    }).catch(() => ({ text: '', explicitlyRequired: false }));
 
-    const bodyText = await page.evaluate(() =>
-      (document.body?.innerText || '').replace(/\s+/g, ' ').trim()
-    ).catch(() => '');
-
-    const pageExplicitlyRequiresConsent =
-      /\bconsent\s+(?:is\s+)?required\s+to\s+continue\b|\brequired\s+consent\b|\bplease\s+(?:provide|give|accept)\s+(?:your\s+)?consent\b/i.test(bodyText);
-
-    const marketingPattern = /\b(news|newsletter|updates?|offers?|promotions?|marketing|communications?|special offers?|products?\s*&?\s*services?)\b/i;
+    const legalPattern = /\b(privacy|policy|terms?|conditions?|legal|agreement|processing|data|personal data|health data|onboarding data|information)\b/i;
     const acceptancePattern = /\b(i\s+)?(?:accept|agree|consent|authorize|authorise)\b/i;
-    const protectedConsentPattern = /\b(privacy|policy|terms?|conditions?|legal|processing|data|personal data|health data|onboarding data|information)\b/i;
+    const marketingPattern = /\b(news|newsletter|updates?|offers?|promotions?|marketing|communications?|special offers?|products?\s*&?\s*services?|future information)\b/i;
 
+    const semantic = page.locator('input[type="checkbox"], [role="checkbox"]');
+    const semanticCount = await semantic.count();
     let found = false;
     let allActive = true;
     let changed = false;
 
-    for (let i = 0; i < count; i++) {
-      const checkbox = candidates.nth(i);
-      if (!(await checkbox.isVisible().catch(() => false))) continue;
-
-      const getInfo = async () => await checkbox.evaluate(el => {
-        let labelText = '';
-        if (el.id) {
-          const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-          if (label) labelText = label.innerText || label.textContent || '';
-        }
-        if (!labelText) {
-          const parentLabel = el.closest('label');
-          if (parentLabel) labelText = parentLabel.innerText || parentLabel.textContent || '';
-        }
-        if (!labelText) labelText = el.getAttribute('aria-label') || '';
-        if (!labelText) {
-          let ancestor = el.parentElement;
-          let depth = 0;
-          while (ancestor && ancestor !== document.body && depth < 6) {
-            const checkboxCount = ancestor.querySelectorAll('input[type="checkbox"], [role="checkbox"]').length;
-            const text = (ancestor.innerText || ancestor.textContent || '').replace(/\s+/g, ' ').trim();
-            if (checkboxCount === 1 && text && text.length <= 500) {
-              labelText = text;
-              break;
-            }
-            ancestor = ancestor.parentElement;
-            depth++;
+    const readSemanticInfo = async checkbox => await checkbox.evaluate(el => {
+      const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+      let labelText = '';
+      if (el.id) {
+        const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (label) labelText = label.innerText || label.textContent || '';
+      }
+      if (!labelText) {
+        const parentLabel = el.closest('label');
+        if (parentLabel) labelText = parentLabel.innerText || parentLabel.textContent || '';
+      }
+      if (!labelText) labelText = el.getAttribute('aria-label') || '';
+      if (!labelText) {
+        let ancestor = el.parentElement;
+        for (let depth = 0; ancestor && ancestor !== document.body && depth < 6; depth++, ancestor = ancestor.parentElement) {
+          const checkboxCount = ancestor.querySelectorAll('input[type="checkbox"], [role="checkbox"]').length;
+          const text = normalize(ancestor.innerText || ancestor.textContent || '');
+          if (checkboxCount === 1 && text && text.length <= 500) {
+            labelText = text;
+            break;
           }
         }
+      }
 
-        return {
-          text: labelText.replace(/\s+/g, ' ').trim().slice(0, 500),
-          checked: el.checked === true || el.getAttribute('aria-checked') === 'true',
-          required: el.required === true ||
-            el.getAttribute('required') !== null ||
-            el.getAttribute('aria-required') === 'true'
-        };
-      }).catch(() => null);
+      const dataState = (el.getAttribute('data-state') || '').toLowerCase();
+      return {
+        text: normalize(labelText).slice(0, 500),
+        checked: el.checked === true ||
+          el.getAttribute('aria-checked') === 'true' ||
+          ['checked', 'selected', 'on', 'true'].includes(dataState),
+        required: el.required === true ||
+          el.getAttribute('required') !== null ||
+          el.getAttribute('aria-required') === 'true'
+      };
+    }).catch(() => null);
 
-      let info = await getInfo();
+    for (let i = 0; i < semanticCount; i++) {
+      const checkbox = semantic.nth(i);
+      if (!(await checkbox.isVisible().catch(() => false))) continue;
+
+      let info = await readSemanticInfo(checkbox);
       if (!info?.text) continue;
 
+      const hasLegalText = legalPattern.test(info.text);
+      const hasAcceptanceText = acceptancePattern.test(info.text);
       const isMarketing = marketingPattern.test(info.text);
-      const looksLikeExplicitConsent =
-        acceptancePattern.test(info.text) && protectedConsentPattern.test(info.text);
+
+      // If the page explicitly says Privacy Policy / Terms consent is REQUIRED to
+      // continue, that requirement wins even when the same checkbox also bundles
+      // future-information/marketing wording.
       const shouldBeRequired =
-        !isMarketing &&
-        (info.required || looksLikeExplicitConsent || pageExplicitlyRequiresConsent);
+        info.required ||
+        (hasLegalText && hasAcceptanceText && (!isMarketing || pageInfo.explicitlyRequired)) ||
+        (pageInfo.explicitlyRequired && hasLegalText);
 
       if (!shouldBeRequired) continue;
 
@@ -2058,29 +2066,22 @@ async function runCrawler() {
         try {
           const tag = await checkbox.evaluate(el => el.tagName.toLowerCase());
           const type = ((await checkbox.getAttribute('type')) || '').toLowerCase();
-          if (tag === 'input' && type === 'checkbox') {
-            await checkbox.check({ force: false });
-          } else {
-            await checkbox.click({ force: false });
-          }
+          if (tag === 'input' && type === 'checkbox') await checkbox.check({ force: false });
+          else await checkbox.click({ force: false });
         } catch {
-          try {
-            const clickedLabel = await checkbox.evaluate(el => {
-              let label = null;
-              if (el.id) label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-              label = label || el.closest('label');
-              if (!label) return false;
-              label.click();
-              return true;
-            });
-            if (!clickedLabel) await checkbox.click({ force: true }).catch(() => {});
-          } catch {
-            await checkbox.click({ force: true }).catch(() => {});
-          }
+          const clickedLabel = await checkbox.evaluate(el => {
+            let label = null;
+            if (el.id) label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+            label = label || el.closest('label');
+            if (!label) return false;
+            label.click();
+            return true;
+          }).catch(() => false);
+          if (!clickedLabel) await checkbox.click({ force: true }).catch(() => {});
         }
 
         await page.waitForTimeout(450);
-        info = await getInfo();
+        info = await readSemanticInfo(checkbox);
         changed = true;
       }
 
@@ -2092,10 +2093,146 @@ async function runCrawler() {
       }
     }
 
-    return { found, active: !found || allActive, changed };
+    if (found) return { found, active: allActive, changed };
+
+    // Some funnels render a custom visual square instead of a semantic
+    // input[type=checkbox]/role=checkbox. Detect the consent ROW by its text, then
+    // click only the checkbox-like control/label in that row -- never the Privacy
+    // Policy / Terms anchor itself.
+    const custom = await page.evaluate(({ explicitlyRequired }) => {
+      const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+      const legal = /\b(privacy|policy|terms?|conditions?|legal|agreement|processing|data|personal data|health data|onboarding data|information)\b/i;
+      const accept = /\b(i\s+)?(?:accept|agree|consent|authorize|authorise)\b/i;
+      const marketing = /\b(news|newsletter|updates?|offers?|promotions?|marketing|communications?|special offers?|products?\s*&?\s*services?|future information)\b/i;
+      const visible = el => {
+        const r = el.getBoundingClientRect();
+        const st = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 &&
+          r.top < window.innerHeight && r.left < window.innerWidth &&
+          st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity) > 0;
+      };
+      const reachable = el => {
+        if (!visible(el)) return false;
+        const r = el.getBoundingClientRect();
+        const x = Math.max(0, Math.min(window.innerWidth - 1, r.left + Math.min(r.width / 2, 18)));
+        const y = Math.max(0, Math.min(window.innerHeight - 1, r.top + r.height / 2));
+        const top = document.elementFromPoint(x, y);
+        return !!top && (top === el || el.contains(top) || top.contains(el));
+      };
+      const checkedLike = el => {
+        if (!el) return false;
+        const state = String(el.getAttribute('data-state') || '').toLowerCase();
+        const cls = String(el.className || '').toLowerCase();
+        return el.getAttribute('aria-checked') === 'true' ||
+          el.getAttribute('aria-selected') === 'true' ||
+          ['checked', 'selected', 'on', 'true'].includes(state) ||
+          /(?:^|[-_\s])(checked|selected|active)(?:$|[-_\s])/.test(cls) ||
+          el.getAttribute('data-crawler-consent-activated') === 'true';
+      };
+
+      const roots = Array.from(document.querySelectorAll(
+        'label, [class*="consent" i], [class*="agreement" i], [class*="privacy" i], [class*="terms" i], form, section, div'
+      )).filter(visible);
+
+      const rows = [];
+      for (const el of roots) {
+        const text = normalize(el.innerText || el.textContent || '');
+        if (!text || text.length < 12 || text.length > 500) continue;
+        const hasLegal = legal.test(text);
+        const hasAccept = accept.test(text);
+        const isMarketing = marketing.test(text);
+        const required = hasLegal && (hasAccept || explicitlyRequired) && (!isMarketing || explicitlyRequired);
+        if (!required) continue;
+
+        const rect = el.getBoundingClientRect();
+        // Avoid selecting huge page-level wrappers that merely contain the real row.
+        if (rect.width > window.innerWidth * 0.98 && rect.height > window.innerHeight * 0.45) continue;
+
+        let target = el.querySelector('input[type="checkbox"], [role="checkbox"]');
+        if (!target) {
+          const small = Array.from(el.querySelectorAll('*')).filter(node => {
+            if (!visible(node) || node.tagName.toLowerCase() === 'a') return false;
+            const r = node.getBoundingClientRect();
+            const st = getComputedStyle(node);
+            const classish = String(node.className || '') + ' ' + (node.id || '');
+            const checkboxishName = /checkbox|check-box|consent|agreement/i.test(classish);
+            const squareish = r.width >= 16 && r.width <= 64 && r.height >= 16 && r.height <= 64 &&
+              Math.abs(r.width - r.height) <= 14;
+            const bordered = parseFloat(st.borderTopWidth || '0') > 0 ||
+              parseFloat(st.borderLeftWidth || '0') > 0;
+            const clickable = node.hasAttribute('onclick') || node.tabIndex >= 0 ||
+              st.cursor === 'pointer' || node.getAttribute('role') === 'button';
+            return checkboxishName || (squareish && (bordered || clickable));
+          }).sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return ar.left - br.left || (ar.width * ar.height) - (br.width * br.height);
+          });
+          target = small[0] || null;
+        }
+
+        if (!target && el.tagName.toLowerCase() === 'label') target = el;
+        if (!target) {
+          const clickable = Array.from(el.querySelectorAll('button, [role="button"], [onclick], [tabindex]'))
+            .find(node => visible(node) && node.tagName.toLowerCase() !== 'a');
+          target = clickable || null;
+        }
+        if (!target) {
+          const st = getComputedStyle(el);
+          if (el.hasAttribute('onclick') || el.tabIndex >= 0 || st.cursor === 'pointer') target = el;
+        }
+        if (!target || target.tagName.toLowerCase() === 'a' || !reachable(target)) continue;
+
+        const targetRect = target.getBoundingClientRect();
+        let score = 0;
+        if (el.tagName.toLowerCase() === 'label') score += 100;
+        if (/checkbox|check-box/i.test(String(target.className || '') + ' ' + (target.id || ''))) score += 90;
+        if (targetRect.width <= 64 && targetRect.height <= 64) score += 70;
+        if (targetRect.left < window.innerWidth * 0.35) score += 40;
+        score -= Math.min(rect.height, 300) / 10;
+
+        rows.push({ el, target, text, score, checked: checkedLike(target) || checkedLike(el) });
+      }
+
+      if (!rows.length) return null;
+      rows.sort((a, b) => b.score - a.score);
+      const chosen = rows[0];
+      const id = 'crawler-custom-consent-' + Date.now() + '-' + Math.floor(Math.random() * 1000000);
+      chosen.target.setAttribute('data-crawler-custom-consent-id', id);
+      chosen.el.setAttribute('data-crawler-custom-consent-row', id);
+      return { id, text: chosen.text, checked: chosen.checked };
+    }, { explicitlyRequired: pageInfo.explicitlyRequired }).catch(() => null);
+
+    if (!custom) return { found: false, active: true, changed: false };
+    found = true;
+
+    if (custom.checked) {
+      console.log('Required custom page consent is already active:', custom.text);
+      return { found: true, active: true, changed: false };
+    }
+
+    console.log('Required custom page consent detected. Activating:', custom.text);
+    const customTarget = page.locator(`[data-crawler-custom-consent-id="${custom.id}"]`);
+    const customClicked = await safeCrawlerClick(customTarget, 'required custom consent checkbox');
+    if (!customClicked) {
+      console.log('Required custom page consent could not be clicked.');
+      return { found: true, active: false, changed: false };
+    }
+
+    await customTarget.evaluate(el => el.setAttribute('data-crawler-consent-activated', 'true')).catch(() => {});
+    await page.waitForTimeout(500);
+    console.log('Required custom page consent click registered.');
+    return { found: true, active: true, changed: true };
   }
 
   async function handleRequiredAgreementCheckboxes(input) {
+    const pageConsentState = await handleRequiredPageConsentCheckboxes();
+    if (pageConsentState.found) {
+      await input.evaluate(el => el.blur?.()).catch(() => {});
+      await page.waitForTimeout(350);
+      return { found: true, active: pageConsentState.active };
+    }
+
     const legalPattern = /\b(terms?|conditions?|privacy|policy|legal|agreement|processing|data processing)\b/i;
     const acceptancePattern = /\b(accept|agree|consent|required|must)\b/i;
     const marketingPattern = /\b(news|newsletter|updates?|offers?|promotions?|marketing|communications?|products?\s*&?\s*services?|special offers?)\b/i;
