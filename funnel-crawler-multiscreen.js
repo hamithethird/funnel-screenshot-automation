@@ -687,7 +687,8 @@ async function runCrawler() {
     }
   }
 
-  await dismissBlockingConsentOverlay();
+  // Allow asynchronously mounted CMP banners to appear before capturing screen 1.
+  await rejectCookieOverlays(page, { waitForBannerMs: 3500 });
   await silenceMedia();
 
   async function handleScratchReveal(screenNumber, state) {
