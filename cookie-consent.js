@@ -30,43 +30,52 @@ function readCookieActionState(el) {
   return { visible, ancestors };
 }
 
-async function rejectCookieOverlays(page, { log = console.log, settleMs = 500 } = {}) {
+async function rejectCookieOverlays(page, { log = console.log, settleMs = 500, waitForBannerMs = 0 } = {}) {
+  // CMP scripts may mount the banner after DOMContentLoaded. Only the startup
+  // check opts into a bounded wait; normal per-step checks remain immediate.
+  const deadline = Date.now() + Math.max(0, waitForBannerMs);
   let rejected = false;
-  // Playwright locators also reach open shadow roots; frames cover embedded CMPs.
-  for (const frame of page.frames()) {
-    const actions = frame.locator('button, [role="button"], input[type="button"], input[type="submit"], a');
-    const count = await actions.count();
-    for (let i = 0; i < count; i++) {
-      const action = actions.nth(i);
-      if (!(await action.isVisible().catch(() => false)) || !(await action.isEnabled().catch(() => false))) continue;
-      const text = ((await action.innerText().catch(() => '')) ||
-        (await action.getAttribute('aria-label')) || (await action.getAttribute('value')) || '').trim();
-      if (!isCookieRejectionText(text)) continue;
-      // Ignore body text and transparent/offscreen banners retained in the DOM.
-      const context = await action.evaluate(readCookieActionState).catch(() => null);
-      if (!context?.visible || !hasCookieContext(context.ancestors)) continue;
-      log('Cookie banner detected. Rejecting with:', text);
-      try {
-        await action.click({ timeout: 5000 });
-        await page.waitForTimeout(settleMs);
-        let dismissed = false;
-        for (let poll = 0; poll < 12; poll++) {
-          const state = await action.evaluate(readCookieActionState).catch(() => null);
-          if (!state?.visible) { dismissed = true; break; }
-          await page.waitForTimeout(250);
+  do {
+    let foundCandidate = false;
+    for (const frame of page.frames()) {
+      const actions = frame.locator('button, [role="button"], input[type="button"], input[type="submit"], a');
+      const count = await actions.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const action = actions.nth(i);
+        if (!(await action.isVisible().catch(() => false)) || !(await action.isEnabled().catch(() => false))) continue;
+        const label = ((await action.innerText().catch(() => '')) ||
+          (await action.getAttribute('aria-label').catch(() => '')) ||
+          (await action.getAttribute('value').catch(() => '')) || '').trim();
+        if (!isCookieRejectionText(label)) continue;
+        const context = await action.evaluate(readCookieActionState).catch(() => null);
+        if (!context?.visible || !hasCookieContext(context.ancestors)) continue;
+        foundCandidate = true;
+        log('Cookie banner detected. Rejecting with:', label);
+        try {
+          await action.click({ timeout: 5000 });
+          await page.waitForTimeout(settleMs);
+          let dismissed = false;
+          for (let poll = 0; poll < 12; poll++) {
+            const state = await action.evaluate(readCookieActionState).catch(() => null);
+            if (!state?.visible) { dismissed = true; break; }
+            await page.waitForTimeout(250);
+          }
+          if (!dismissed) {
+            log('Cookie rejection click did not dismiss the banner:', label);
+            continue;
+          }
+          log('Cookie banner rejected and dismissed.');
+          rejected = true;
+          break;
+        } catch (error) {
+          log('Cookie rejection failed:', label, String(error?.message || error).split('\n')[0]);
         }
-        if (!dismissed) throw new Error('banner still visible');
-      } catch {
-        log('Cookie rejection did not close the banner:', text);
-        continue;
       }
-      log('Cookie banner rejected and dismissed.');
-      rejected = true;
-      // The click changes the DOM. Refresh actions on the next call/frame
-      // rather than reusing indexes that could now point at funnel answers.
-      break;
+      if (rejected) break;
     }
-  }
+    if (rejected || foundCandidate || Date.now() >= deadline) break;
+    await page.waitForTimeout(Math.min(350, Math.max(0, deadline - Date.now())));
+  } while (Date.now() < deadline);
   return rejected;
 }
 
