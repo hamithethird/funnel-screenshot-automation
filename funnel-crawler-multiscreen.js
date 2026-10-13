@@ -833,6 +833,13 @@ async function runCrawler() {
     };
 
     let visualChanged = false;
+    let scratchRevealWaitCompleted = false;
+    const waitAfterConfirmedScratch = async () => {
+      if (!visualChanged || scratchRevealWaitCompleted) return;
+      scratchRevealWaitCompleted = true;
+      console.log('Scratch surface visibly changed. Waiting 4 seconds for delayed reveal/Continue CTA.');
+      await page.waitForTimeout(4000);
+    };
     let afterState = beforeState;
 
     try {
@@ -843,6 +850,7 @@ async function runCrawler() {
 
         const currentVisual = await target.screenshot().catch(() => null);
         if (beforeVisual && currentVisual && !beforeVisual.equals(currentVisual)) visualChanged = true;
+        await waitAfterConfirmedScratch();
 
         afterState = await inspectPageNavigationSafe('post-scratch inspection').catch(() => beforeState);
         const signatureChanged = pageSignature(afterState) !== beforeSignature;
@@ -5107,6 +5115,18 @@ async function runCrawler() {
       }
     }
 
+    // Completed-plan and intermediate reveal screens can animate charts or
+    // content into place after the first DOM/text snapshot is stable.
+    // Apply a dedicated 3s hold only to recognizable visual transition pages.
+    if (!paywallState.isPagePaywall && (
+      /\\b(?:your (?:personalized |personalised )?plan is ready|(?:learning|fitness|weight loss) growth|building your plan|plan is (?:almost )?ready)\\b/i.test(state.pageText || '') ||
+      (isPassiveTransitionScreen(state.pageText || '') &&
+        !(await hasVisibleEditableInput()) && (state.group?.length || 0) === 0)
+    )) {
+      console.log('Animated transition page detected. Waiting 3 seconds before screenshot.');
+      await page.waitForTimeout(3000);
+      state = await inspectPageNavigationSafe('animated transition after 3s').catch(() => state);
+    }
     await prepareFullPageCapture();
     await page.screenshot({ path: filename, fullPage: true });
     registerBaseScreenshot(screenNumber, filename);
