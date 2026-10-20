@@ -4681,6 +4681,74 @@ async function runCrawler() {
     return { handled: true, advanced: false };
   }
 
+  async function handleMatchingPairs(state) {
+    if (!/\b(match(?:ing)? pairs?|tap the matching pairs|pair the words)\b/i.test(state.pageText || '')) {
+      return { handled: false, advanced: false };
+    }
+    const beforeSignature = pageSignature(state);
+    // Locate exact equal-text pairs in separate columns. Match by DOM identity,
+    // not text alone: the same word must be clicked twice, once in each column.
+    const pairs = await page.evaluate(() => {
+      const nodes = Array.from(document.querySelectorAll('button, [role="button"], [data-auto-id]'));
+      const visible = el => {
+        const r=el.getBoundingClientRect(),cs=getComputedStyle(el);
+        return r.width > 40 && r.height > 25 && r.top >= 0 && r.bottom < innerHeight &&
+          cs.display !== 'none' && cs.visibility !== 'hidden' && cs.pointerEvents !== 'none';
+      };
+      const tiles=nodes.filter(visible).map(el=>({
+        el, text:(el.innerText || el.textContent || '').replace(/\s+/g,' ').trim().toLowerCase(),
+        x:el.getBoundingClientRect().left+el.getBoundingClientRect().width/2,
+        y:el.getBoundingClientRect().top
+      })).filter(x=>x.text && x.text.length<=35 && !/^(check|continue|next|back|skip)$/.test(x.text));
+      const groups=new Map();
+      for(const tile of tiles) {
+        if(!groups.has(tile.text)) groups.set(tile.text,[]);
+        groups.get(tile.text).push(tile);
+      }
+      const matches=[];
+      for(const [word,options] of groups) {
+        if(options.length!==2) continue;
+        const [left,right]=options.sort((a,b)=>a.x-b.x);
+        if(right.x-left.x<65) continue;
+        matches.push({word,left,right,top:Math.min(left.y,right.y)});
+      }
+      if(matches.length<2) return [];
+      matches.sort((a,b)=>a.top-b.top);
+      return matches.map((pair,i)=>{
+        const l='crawler-pair-left-'+i,r='crawler-pair-right-'+i;
+        pair.left.el.setAttribute('data-crawler-pair-id',l);
+        pair.right.el.setAttribute('data-crawler-pair-id',r);
+        return {word:pair.word,left:l,right:r};
+      });
+    }).catch(()=>[]);
+    if (!pairs.length) return { handled: false, advanced: false };
+    console.log('Matching-pairs interaction detected:', pairs.map(x=>x.word).join(', '));
+    for(const pair of pairs) {
+      for(const id of [pair.left,pair.right]) {
+        const tile=page.locator('[data-crawler-pair-id="'+id+'"]');
+        if(!await tile.isVisible().catch(()=>false)) break;
+        if(!await tile.isEnabled().catch(()=>false)) break;
+        if(!await safeCrawlerClick(tile,'matching tile '+pair.word)) return {handled:true,advanced:false};
+        await page.waitForTimeout(220);
+      }
+      await page.waitForTimeout(350);
+      const current=await inspectPageNavigationSafe('matched-pair progress');
+      if(sanitizeUrl(page.url())!==sanitizeUrl(state.url || page.url()) ||
+         (questionPromptFingerprint(current) && questionPromptFingerprint(state) &&
+          contextSimilarity(questionPromptFingerprint(current),questionPromptFingerprint(state))<0.75)) {
+        return {handled:true,advanced:true};
+      }
+    }
+    const check=page.getByRole('button',{name:/^(check|continue|next|done|submit)$/i}).first();
+    if(await check.count() && await check.isVisible().catch(()=>false) && await check.isEnabled().catch(()=>false)) {
+      console.log('Matching-pairs CTA unlocked. Submitting.');
+      const clicked=await safeCrawlerClick(check,'matching-pairs submit');
+      if(clicked && await waitForAdvancement(beforeSignature,12000)) return {handled:true,advanced:true};
+    }
+    console.log('Matching-pairs handler finished without confirmed navigation.');
+    return {handled:true,advanced:false};
+  }
+
   async function advanceOneScreen(state, screenNumber = null) {
     const handledEnglishLanguageChoice = await handleEnglishLanguageChoice();
     if (handledEnglishLanguageChoice) return true;
@@ -4690,6 +4758,9 @@ async function runCrawler() {
     }
     const skippedOptionalInput = await handleSkippableInputRequirement(state);
     if (skippedOptionalInput) return true;
+
+    const pairsResult = await handleMatchingPairs(state);
+    if (pairsResult.handled) return pairsResult.advanced;
 
     const scratchResult = await handleScratchReveal(screenNumber, state);
     if (scratchResult.handled) return scratchResult.advanced;
