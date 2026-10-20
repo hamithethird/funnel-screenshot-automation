@@ -1859,7 +1859,7 @@ async function runCrawler() {
         // than stopping after one click. Normal single-select pages without a
         // gated CTA retain their previous stop behavior.
         const gatedCTA = await page.evaluate(() => Array.from(document.querySelectorAll('button, [role="button"]')).some(el => {
-          const text = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+          const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
           const style = getComputedStyle(el);
           const r = el.getBoundingClientRect();
           return /^(check|continue|next|done|submit)$/i.test(text) &&
