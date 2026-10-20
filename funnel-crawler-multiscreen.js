@@ -1767,13 +1767,13 @@ async function runCrawler() {
 
       if (!option) {
         option = uniqueGroup.find(candidate => {
-          const key = ((candidate.text || '').trim().toLowerCase() || candidate.id);
+          const key = candidate.id || (candidate.text || '').trim().toLowerCase();
           return !selectedKeys.has(key);
         });
       }
 
       if (!option) break;
-      const optionKey = ((option.text || '').trim().toLowerCase() || option.id);
+      const optionKey = option.id || (option.text || '').trim().toLowerCase();
       console.log(`Selecting option ${selectedKeys.size + 1}:`, option.text || '[no visible text]');
       const clicked = await safeCrawlerClick(page.locator(`[data-auto-id="${option.id}"]`), option.text || 'answer option');
       if (!clicked) return false;
@@ -1854,6 +1854,22 @@ async function runCrawler() {
         // Retry the larger containing answer card once before giving up.
         const advancedByCard = await clickAnswerCardFallback(option.text || '', initialSignature);
         if (advancedByCard) return true;
+        // If a disabled bottom CTA is present, this may actually be a gated
+        // multi-action exercise. Keep trying distinct untouched controls rather
+        // than stopping after one click. Normal single-select pages without a
+        // gated CTA retain their previous stop behavior.
+        const gatedCTA = await page.evaluate(() => Array.from(document.querySelectorAll('button, [role="button"]')).some(el => {
+          const text = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+          const style = getComputedStyle(el);
+          const r = el.getBoundingClientRect();
+          return /^(check|continue|next|done|submit)$/i.test(text) &&
+            r.width > 0 && r.height > 0 && style.display !== 'none' &&
+            (el.disabled || el.getAttribute('aria-disabled') === 'true' || style.pointerEvents === 'none');
+        })).catch(() => false);
+        if (gatedCTA && selectedKeys.size < hardMax) {
+          console.log('Bottom CTA still locked. Trying another untouched answer control.');
+          continue;
+        }
         console.log('Single-select page has no explicit Continue CTA and neither the nested control nor the containing answer card advanced.');
         return false;
       }
