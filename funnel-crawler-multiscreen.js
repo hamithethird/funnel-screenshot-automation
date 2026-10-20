@@ -3072,7 +3072,7 @@ async function runCrawler() {
       if (semanticName?.id) {
         const input = page.locator(`[data-crawler-semantic-input-id="${semanticName.id}"]`);
         console.log('Detected name input from page intent.');
-        const written = await writeSemanticFormControl(input, 'Alex');
+        const written = await writeSemanticFormControl(input, 'Hami');
         if (!written) return { recognized: true, advanced: false };
         const agreementState = await handleRequiredAgreementCheckboxes(input);
         if (!agreementState.active) return { recognized: true, advanced: false };
@@ -3140,7 +3140,7 @@ async function runCrawler() {
         /\b(first[\s_-]*name|your[\s_-]*name|name)\b/i.test(signals)
       ) {
         fieldType = 'name';
-        value = 'Alex';
+        value = 'Hami';
       }
       if (!value) continue;
       console.log(`Detected ${fieldType} input.`);
