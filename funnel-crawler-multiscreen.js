@@ -5,6 +5,57 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+const RUN_PASSWORD = '***REMOVED***';
+const BASE_RUN_EMAIL = 'REMOVED_EMAIL';
+const FALLBACK_RUN_EMAIL = 'REMOVED_EMAIL';
+
+// Page text and Playwright errors can echo filled values. Redact all crawler logs.
+function redactCrawlerLog(...args) {
+  return require('util').format(...args).split(RUN_PASSWORD).join('[REDACTED]');
+}
+const console = {
+  log: (...args) => globalThis.console.log(redactCrawlerLog(...args)),
+  error: (...args) => globalThis.console.error(redactCrawlerLog(...args))
+};
+
+function createRunCredentials() {
+  let email = BASE_RUN_EMAIL;
+  return {
+    currentRunEmail: () => email,
+    advanceRunEmail: () => {
+      if (email !== BASE_RUN_EMAIL) return null;
+      email = FALLBACK_RUN_EMAIL;
+      return email;
+    }
+  };
+}
+
+function genericFormFieldType(info, visibleFormIntent = '') {
+  const signals = [info.name, info.placeholder, info.autocomplete, info.ariaLabel, info.label].join(' ');
+  // Field-specific metadata wins over page copy, particularly on combined signup forms.
+  if (info.type === 'password' || ['new-password', 'current-password'].includes(info.autocomplete) ||
+      /\b(password|passcode|create[\s_-]*password|confirm[\s_-]*password)\b/i.test(signals)) return 'password';
+  if (info.type === 'email' || info.autocomplete === 'email' || /\be-?mail\b/i.test(signals)) return 'email';
+  if (['name', 'given-name', 'first-name'].includes(info.autocomplete) ||
+      /\b(first[\s_-]*name|your[\s_-]*name|name)\b/i.test(signals)) return 'name';
+  if (/\b(password|passcode)\b/i.test(visibleFormIntent)) return 'password';
+  if (/\be-?mail\b/i.test(visibleFormIntent)) return 'email';
+  return null;
+}
+
+function isEmailRejection(text) {
+  const normalized = (text || '').replace(/\s+/g, ' ').trim();
+  return [
+    /(?:email|e-mail|email address).{0,80}(?:already|previously).{0,40}(?:used|taken|registered|exists?|in use|associated|linked)/i,
+    /(?:already|previously).{0,40}(?:used|taken|registered|exists?|in use|associated|linked).{0,80}(?:email|e-mail)/i,
+    /(?:account|user).{0,60}(?:already exists|already registered|already in use)/i,
+    /duplicate\s+(?:email|account|user)/i,
+    /(?:invalid|unsupported|blocked|rejected|not allowed|not accepted|not supported|cannot (?:use|accept)).{0,40}(?:e-?mail|domain)/i,
+    /(?:e-?mail|domain).{0,60}(?:invalid|unsupported|blocked|rejected|not allowed|not accepted|not supported|cannot be used)/i,
+    /(?:enter|provide|use).{0,20}(?:valid|different|another).{0,20}e-?mail/i
+  ].some(pattern => pattern.test(normalized));
+}
+
 function isNativeLanguageQuestion(text) {
   const normalized = (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
   const patterns = [
@@ -569,43 +620,7 @@ async function runCrawler() {
     return result;
   }
 
-  const BASE_RUN_EMAIL = 'REMOVED_EMAIL';
-  let activeRunEmail = BASE_RUN_EMAIL;
-
-  function currentRunEmail() {
-    return activeRunEmail;
-  }
-
-  function advanceRunEmail() {
-    // After the normal address collides, generate a fresh unique address for this
-    // run. Avoid plus-addressing because some funnels reject '+' in email inputs.
-    const timestamp = Date.now().toString(36);
-    const randomPart = crypto.randomBytes(6).toString('hex');
-    activeRunEmail = `REMOVED_EMAIL`;
-    return activeRunEmail;
-  }
-
-  function generateRunPassword(length = 16) {
-    const lowercase = 'abcdefghijklmnopqrstuvwxyz';
-    const uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-    const digits = '0123456789';
-    const all = lowercase + uppercase + digits;
-    const chars = [
-      uppercase[Math.floor(Math.random() * uppercase.length)],
-      digits[Math.floor(Math.random() * digits.length)],
-      lowercase[Math.floor(Math.random() * lowercase.length)]
-    ];
-    while (chars.length < Math.max(length, 8)) {
-      chars.push(all[Math.floor(Math.random() * all.length)]);
-    }
-    for (let i = chars.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [chars[i], chars[j]] = [chars[j], chars[i]];
-    }
-    return chars.join('');
-  }
-
-  const RUN_PASSWORD = generateRunPassword(16);
+  const { currentRunEmail, advanceRunEmail } = createRunCredentials();
   const supplementalCounterByScreen = new Map();
   const supplementalFingerprintsByScreen = new Map();
   let skipNextNumberedFingerprint = null;
@@ -2976,7 +2991,7 @@ async function runCrawler() {
     return { recognized: false, advanced: false };
   }
 
-  async function emailAlreadyUsedDetected(input) {
+  async function emailRejectionDetected(input) {
     const details = await input.evaluate(el => {
       const texts = [];
       const add = value => {
@@ -2984,71 +2999,52 @@ async function runCrawler() {
         if (text) texts.push(text);
       };
 
+      const visible = node => node.getClientRects().length > 0 &&
+        getComputedStyle(node).visibility !== 'hidden';
       add(el.validationMessage || '');
 
       const errorMessageId = el.getAttribute('aria-errormessage');
       if (errorMessageId) {
         const node = document.getElementById(errorMessageId);
-        if (node) add(node.innerText || node.textContent || '');
+        if (node && visible(node)) add(node.innerText || node.textContent || '');
       }
 
       const describedBy = (el.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean);
       for (const id of describedBy) {
         const node = document.getElementById(id);
-        if (node) add(node.innerText || node.textContent || '');
+        if (node && visible(node) && (el.getAttribute('aria-invalid') === 'true' ||
+            node.matches('[role="alert"], [class*="error" i], [class*="invalid" i]'))) {
+          add(node.innerText || node.textContent || '');
+        }
       }
 
       let ancestor = el.parentElement;
       for (let depth = 0; ancestor && depth < 6; depth++, ancestor = ancestor.parentElement) {
         for (const node of ancestor.querySelectorAll(
-          '[role="alert"], [aria-live], [class*="error" i], [class*="invalid" i], [class*="message" i], [class*="helper" i], [class*="hint" i]'
+          '[role="alert"], [aria-live="assertive"], [class*="error" i], [class*="invalid" i]'
         )) {
-          add(node.innerText || node.textContent || '');
+          if (visible(node)) add(node.innerText || node.textContent || '');
         }
       }
 
       return texts.join(' | ');
     }).catch(() => '');
 
-    const pageText = await page.evaluate(() => {
-      const parts = [];
-      const add = value => {
-        const text = (value || '').replace(/\s+/g, ' ').trim();
-        if (text) parts.push(text);
-      };
-
-      add(document.body?.innerText || '');
-
-      for (const node of document.querySelectorAll(
-        '[role="alert"], [aria-live], [class*="error" i], [class*="invalid" i], [class*="message" i], [class*="helper" i], [class*="hint" i]'
-      )) {
-        add(node.innerText || node.textContent || '');
-      }
-
-      return parts.join(' | ');
-    }).catch(() => '');
-
-    const combined = (pageText + ' ' + details).toLowerCase();
-    const patterns = [
-      /(?:email|e-mail).{0,100}(?:already|previously).{0,50}(?:used|taken|registered|exists|exist|in use|associated|linked)/i,
-      /(?:already|previously).{0,50}(?:used|taken|registered|exists|exist|in use|associated|linked).{0,100}(?:email|e-mail)/i,
-      /(?:account|user).{0,100}(?:already exists|already registered|already in use|already has)/i,
-      /(?:an?|this)\s+account\s+(?:with\s+this\s+email\s+)?already\s+exists/i,
-      /duplicate\s+(?:email|account|user)/i,
-      /email\s+(?:has\s+)?already\s+been\s+(?:used|taken|registered)/i,
-      /this\s+email\s+(?:is\s+)?(?:already\s+)?(?:used|taken|registered|in use)/i
-    ];
-
-    const matched = patterns.some(pattern => pattern.test(combined));
-    if (matched) console.log('Email collision message detected on the page.');
-    return matched;
+    const alerts = await page.evaluate(() => Array.from(document.querySelectorAll(
+      '[role="alert"], [aria-live="assertive"]'
+    )).filter(node => node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden')
+      .map(node => node.innerText || node.textContent || '').join(' | ')).catch(() => '');
+    return isEmailRejection(details) || isEmailRejection(alerts);
   }
 
   async function retryWithNextEmailIfNeeded(input) {
-    if (!(await emailAlreadyUsedDetected(input))) return null;
+    if (currentRunEmail() !== BASE_RUN_EMAIL) return null;
+    if ((await input.inputValue().catch(() => '')) !== BASE_RUN_EMAIL) return null;
+    if (!(await emailRejectionDetected(input))) return null;
 
     const nextEmail = advanceRunEmail();
-    console.log(`Email collision detected. Generated a fresh random email: ${nextEmail}`);
+    if (!nextEmail) return null;
+    console.log('Primary email rejected. Retrying with the configured backup email.');
 
     await input.fill(nextEmail);
     await input.evaluate(el => {
@@ -3101,6 +3097,7 @@ async function runCrawler() {
       'input:not([type]), input[type="text"], input[type="email"], input[type="password"], textarea'
     );
     const count = await fields.count();
+    const pendingFields = [];
     for (let i = 0; i < count; i++) {
       const input = fields.nth(i);
       if (!(await input.isVisible()) || !(await input.isEnabled()) || !(await input.isEditable())) continue;
@@ -3123,38 +3120,12 @@ async function runCrawler() {
           label: labelText.trim().toLowerCase()
         };
       });
-      const signals = [info.name, info.placeholder, info.autocomplete, info.ariaLabel, info.label, visibleFormIntent].join(' ');
-      let fieldType = null;
-      let value = null;
-      if (info.type === 'email' || info.autocomplete === 'email' || /\be-?mail\b/i.test(signals)) {
-        fieldType = 'email';
-        value = currentRunEmail();
-      } else if (
-        info.type === 'password' || ['new-password', 'current-password'].includes(info.autocomplete) ||
-        /\b(password|passcode|create[\s_-]*password|confirm[\s_-]*password)\b/i.test(signals)
-      ) {
-        fieldType = 'password';
-        value = RUN_PASSWORD;
-      } else if (
-        ['name', 'given-name', 'first-name'].includes(info.autocomplete) ||
-        /\b(first[\s_-]*name|your[\s_-]*name|name)\b/i.test(signals)
-      ) {
-        fieldType = 'name';
-        value = 'Hami';
-      }
+      const fieldType = genericFormFieldType(info, visibleFormIntent);
+      const value = fieldType === 'password' ? RUN_PASSWORD :
+        fieldType === 'email' ? currentRunEmail() : fieldType === 'name' ? 'Hami' : null;
       if (!value) continue;
       console.log(`Detected ${fieldType} input.`);
       await input.fill(value);
-      if (fieldType === 'password') {
-        const passwordState = await input.evaluate(el => ({
-          length: el.value.length,
-          valid: el.validity ? el.validity.valid : null,
-          validationMessage: el.validationMessage || ''
-        }));
-        console.log('PASSWORD DEBUG - generated password length:', passwordState.length);
-        console.log('PASSWORD DEBUG - browser validity:', passwordState.valid);
-        console.log('PASSWORD DEBUG - validation message:', passwordState.validationMessage || '(none)');
-      }
       if (fieldType === 'email') {
         const actualEmailState = await input.evaluate(el => ({
           value: el.value,
@@ -3172,6 +3143,22 @@ async function runCrawler() {
         el.blur();
       });
       await page.waitForTimeout(500);
+      pendingFields.push({ input, fieldType });
+    }
+    // A validation error changes page text too; it must not count as advancement.
+    async function waitForFormAdvancement(beforeSignature, timeoutMs) {
+      const advanced = await waitForAdvancement(beforeSignature, timeoutMs);
+      if (!advanced) return false;
+      for (const field of pendingFields) {
+        if (field.fieldType === 'email' && await field.input.isVisible().catch(() => false) &&
+            await emailRejectionDetected(field.input)) return false;
+      }
+      return true;
+    }
+    // Fill password/confirmation fields before submitting a combined signup form.
+    // Submit through its email field first so any rejection uses the bounded retry.
+    pendingFields.sort((a, b) => Number(b.fieldType === 'email') - Number(a.fieldType === 'email'));
+    for (const { input, fieldType } of pendingFields) {
       const agreementState = await handleRequiredAgreementCheckboxes(input);
       if (!agreementState.active) return { recognized: true, advanced: false };
       const beforeSubmitState = await inspectPage();
@@ -3183,7 +3170,7 @@ async function runCrawler() {
           const termsBeforeSubmit = await handleRequiredAgreementCheckboxes(input);
           if (!termsBeforeSubmit.active) return { recognized: true, advanced: false };
           const submittedByClick = await safeCrawlerClick(submit, 'form submit control');
-          if (submittedByClick && await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
+          if (submittedByClick && await waitForFormAdvancement(beforeSignature)) return { recognized: true, advanced: true };
           if (fieldType === 'email' && await retryWithNextEmailIfNeeded(input)) {
             return await handleGenericFormInput(await inspectPageNavigationSafe('email collision retry'));
           }
@@ -3194,7 +3181,7 @@ async function runCrawler() {
           formEl.requestSubmit();
           return true;
         });
-        if (submitted && await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
+        if (submitted && await waitForFormAdvancement(beforeSignature)) return { recognized: true, advanced: true };
         if (fieldType === 'email' && await retryWithNextEmailIfNeeded(input)) {
           return await handleGenericFormInput(await inspectPageNavigationSafe('email collision retry'));
         }
@@ -3204,7 +3191,7 @@ async function runCrawler() {
         const termsBeforeNearbyAction = await handleRequiredAgreementCheckboxes(input);
         if (!termsBeforeNearbyAction.active) return { recognized: true, advanced: false };
         const clicked = await safeCrawlerClick(nearbyAction.locator, nearbyAction.text || 'bottom primary CTA');
-        if (clicked && await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
+        if (clicked && await waitForFormAdvancement(beforeSignature)) return { recognized: true, advanced: true };
         if (fieldType === 'email' && await retryWithNextEmailIfNeeded(input)) {
           return await handleGenericFormInput(await inspectPageNavigationSafe('email collision retry'));
         }
@@ -3225,7 +3212,7 @@ async function runCrawler() {
           const agreementBeforePlan = await handleRequiredAgreementCheckboxes(input);
           if (!agreementBeforePlan.active) return { recognized: true, advanced: false };
           const clicked = await safeCrawlerClick(planTarget, 'email plan submission CTA');
-          if (clicked && await waitForAdvancement(beforeSignature, 12000)) return { recognized: true, advanced: true };
+          if (clicked && await waitForFormAdvancement(beforeSignature, 12000)) return { recognized: true, advanced: true };
           if (await retryWithNextEmailIfNeeded(input)) {
             return await handleGenericFormInput(await inspectPageNavigationSafe('email collision retry'));
           }
@@ -3235,7 +3222,7 @@ async function runCrawler() {
       if (!termsBeforeEnter.active) return { recognized: true, advanced: false };
       console.log(`Trying Enter for ${fieldType} input.`);
       await input.press('Enter');
-      if (await waitForAdvancement(beforeSignature)) return { recognized: true, advanced: true };
+      if (await waitForFormAdvancement(beforeSignature)) return { recognized: true, advanced: true };
       if (fieldType === 'email' && await retryWithNextEmailIfNeeded(input)) {
         return await handleGenericFormInput(await inspectPageNavigationSafe('email collision retry'));
       }
@@ -5304,5 +5291,9 @@ async function runCrawler() {
   console.log('Crawler finished.');
 }
 
-if (require.main === module) runCrawler();
-module.exports = { getAgeQuestionEvidence, shouldDeferAgeSelectionToForm, shouldFollowProfileContinue };
+if (require.main === module) runCrawler().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
+module.exports = { getAgeQuestionEvidence, shouldDeferAgeSelectionToForm, shouldFollowProfileContinue,
+  createRunCredentials, genericFormFieldType, isEmailRejection, redactCrawlerLog };
