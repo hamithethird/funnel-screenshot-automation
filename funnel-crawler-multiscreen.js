@@ -2085,6 +2085,8 @@ async function runCrawler() {
 
       let info = await readSemanticInfo(checkbox);
       if (!info?.text) continue;
+      const cookieContext = await checkbox.evaluate(readCookieActionState).catch(() => null);
+      if (cookieContext && hasCookieContext(cookieContext.ancestors)) continue;
 
       const hasLegalText = legalPattern.test(info.text);
       const hasAcceptanceText = acceptancePattern.test(info.text);
@@ -2178,6 +2180,7 @@ async function runCrawler() {
       for (const el of roots) {
         const text = normalize(el.innerText || el.textContent || '');
         if (!text || text.length < 12 || text.length > 500) continue;
+        if (/\bcookies?\b/i.test(text)) continue;
         const hasLegal = legal.test(text);
         const hasAccept = accept.test(text);
         const isMarketing = marketing.test(text);
@@ -2260,7 +2263,7 @@ async function runCrawler() {
         const nodes = Array.from(document.querySelectorAll('p, span, label, div'))
           .filter(el => {
             const t = norm(el.innerText);
-            return t.length > 18 && t.length < 300 && legal.test(t) && accept.test(t) && visible(el);
+            return t.length > 18 && t.length < 300 && legal.test(t) && accept.test(t) && !/\bcookies?\b/i.test(t) && visible(el);
           }).sort((a,b) => a.getBoundingClientRect().height - b.getBoundingClientRect().height);
         for (const label of nodes) {
           const labelRect = label.getBoundingClientRect();
