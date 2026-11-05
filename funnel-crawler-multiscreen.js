@@ -1329,7 +1329,7 @@ async function runCrawler() {
 
       const answerIds = new Set(bestGroup ? bestGroup.items.map(item => item.id) : []);
       let bestCTA = null;
-      const nonNavigationLinkText = /^(?:privacy(?: policy)?|terms(?: & conditions)?|terms and conditions|conditions of use|subscription policy|money-back(?: guarantee)?|docs?|faq|help|support|legal|cookie(?: policy)?)$/i;
+      const nonNavigationLinkText = /^(?:privacy(?: policy)?|terms(?: of (?:use|service)| & conditions)?|terms and conditions|conditions of use|subscription policy|money-back(?: guarantee)?|docs?|faq|help|support|legal|cookie(?: policy)?)$/i;
       for (const item of controls) {
         if (item.answerControl || answerIds.has(item.id)) continue;
         if (nonNavigationLinkText.test((item.text || '').trim())) continue;
@@ -2535,7 +2535,7 @@ async function runCrawler() {
       // Legal/help/footer links can sit directly under the email field and score
       // highly by proximity. They are not submission controls.
       const formActionText = (info.text || '').trim();
-      if (/^(?:privacy(?: policy)?|terms(?: & conditions)?|terms and conditions|conditions|legal|cookie(?: policy)?|learn more|help|support)$/i.test(formActionText)) {
+      if (/^(?:privacy(?: policy)?|terms(?: of (?:use|service)| & conditions)?|terms and conditions|conditions|legal|cookie(?: policy)?|learn more|help|support)$/i.test(formActionText)) {
         continue;
       }
 
@@ -4757,6 +4757,26 @@ async function runCrawler() {
 
   // Dedicated legal acceptance buttons supplement the checkbox handlers. Generic
   // Continue/answer buttons remain with the normal funnel navigation logic.
+  function isOptionalMarketingPrompt(state) {
+    const text = (state?.pageText || '').replace(/\s+/g, ' ');
+    const explicitDecline = (state?.group || []).some(item => /i don['’]t want to receive tips or updates/i.test(item.text || ''));
+    return explicitDecline || (/\b(?:do|would) you.{0,30}(?:want|like).{0,20}(?:receive|get)\s+e-?mails?\b/i.test(text) && /\b(?:tips|updates|offers|promotions|newsletter|marketing)\b/i.test(text));
+  }
+
+  async function handleOptionalMarketingPrompt(state) {
+    if (!isOptionalMarketingPrompt(state)) return { handled: false, advanced: false };
+    const decline = page.getByText(/^(?:i don['’]t want to receive tips or updates|no(?:,? thanks)?|not now|skip|continue without (?:emails|updates|offers))$/i).first();
+    if (!(await decline.isVisible().catch(() => false))) {
+      console.log('Optional email prompt detected, but no decline control was found. Leaving marketing unselected and stopping for review.');
+      return { handled: true, advanced: false };
+    }
+    const before = pageSignature(state);
+    const label = await decline.innerText();
+    console.log('Declining optional marketing:', label);
+    const clicked = await safeCrawlerClick(decline, 'decline optional marketing');
+    return { handled: true, advanced: clicked && await waitForAdvancement(before, 12000) };
+  }
+
   async function handleLegalAcceptanceButton(state) {
     const target = await page.evaluate(() => {
       const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
@@ -4799,6 +4819,8 @@ async function runCrawler() {
   }
 
   async function advanceOneScreen(state, screenNumber = null) {
+    const marketing = await handleOptionalMarketingPrompt(state);
+    if (marketing.handled) return marketing.advanced;
     const legalAcceptance = await handleLegalAcceptanceButton(state);
     if (legalAcceptance.handled) return legalAcceptance.advanced;
     const handledEnglishLanguageChoice = await handleEnglishLanguageChoice();
@@ -5285,7 +5307,7 @@ async function runCrawler() {
     // Read explicit page intent before generic branch exploration. A page whose
     // title/subtitle says to choose/select an age is a direct selection task, not
     // a conditional-branch experiment. We consistently choose the range containing 25.
-    const explicitAgeChoice = await handleExplicitAgeSelection(state);
+    const explicitAgeChoice = isOptionalMarketingPrompt(state) ? await handleOptionalMarketingPrompt(state) : await handleExplicitAgeSelection(state);
     if (explicitAgeChoice.handled) {
       interactionHandledBySpecialCase = true;
       acted = explicitAgeChoice.advanced;
