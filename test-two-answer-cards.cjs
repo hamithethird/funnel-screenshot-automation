@@ -12,7 +12,7 @@ const { chromium } = require('playwright');
     const end = source.indexOf('\n  function pageSignature(', start);
     const inspect = vm.runInNewContext(`(${source.slice(start,end)})`, {page});
     const render = async (question, cards) => {
-      await page.setContent(`<style>body{margin:20px}.row{margin-top:12px}.card{cursor:pointer;width:330px;height:70px;background:#f8f9ff;display:flex;align-items:center}</style><h1>${question}</h1>${cards.map(text=>`<div class="row"><div class="card">${text}</div></div>`).join('')}`);
+      await page.setContent(`<style>body{margin:20px;padding-top:40px}.row{margin-top:12px}.card{cursor:pointer;width:330px;height:70px;background:#f8f9ff;display:flex;align-items:center}</style><h1>${question}</h1>${cards.map(text=>`<div class="row"><div class="card">${text}</div></div>`).join('')}`);
       return await inspect();
     };
     const two = await render('How do you feel about constructive feedback?', ['I take it as an opportunity','Makes me feel bad']);
