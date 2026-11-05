@@ -1273,7 +1273,7 @@ async function runCrawler() {
         item.top >= vh * 0.12 && item.bottom <= vh * 0.90
       );
 
-      if (spatialCandidates.length >= 3) {
+      if (spatialCandidates.length >= 3 || (spatialCandidates.length === 2 && questionSignals.test(pageText))) {
         const buckets = [];
         for (const item of spatialCandidates) {
           let bucket = buckets.find(group => {
@@ -1290,7 +1290,7 @@ async function runCrawler() {
 
         for (let bucketIndex = 0; bucketIndex < buckets.length; bucketIndex++) {
           const bucket = buckets[bucketIndex];
-          if (bucket.length < 3 || bucket.length > 24) continue;
+          if (bucket.length < 2 || bucket.length > 24 || (bucket.length === 2 && !questionSignals.test(pageText))) continue;
           const rows = [];
           const cols = [];
           for (const item of bucket) {
