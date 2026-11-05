@@ -4752,7 +4752,52 @@ async function runCrawler() {
     return {handled:true,advanced:false};
   }
 
+  // Dedicated legal acceptance buttons supplement the checkbox handlers. Generic
+  // Continue/answer buttons remain with the normal funnel navigation logic.
+  async function handleLegalAcceptanceButton(state) {
+    const target = await page.evaluate(() => {
+      const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+      const legal = /\b(?:terms(?:\s+of\s+(?:use|service))?|conditions|privacy\s+policy|user\s+agreement)\b/i;
+      const acceptance = /^(?:(?:i\s+)?(?:agree|accept)(?:\s+(?:to\s+)?(?:the\s+)?(?:terms(?:\s+of\s+(?:use|service))?|conditions|privacy\s+policy)(?:\s+(?:and|&)\s+(?:terms|conditions|privacy\s+policy))?)?(?:\s+(?:and|&)\s+(?:continue|proceed))?|accept\s+and\s+continue)[.!]?$/i;
+      const excluded = /\b(?:cookies?|marketing|newsletter|promotions?|subscribe|subscription|purchase|buy|pay|checkout|trial|billing|charge|order)\b|[$€£¥]/i;
+      const candidates = [];
+      for (const el of document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]')) {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        if (el.disabled || el.getAttribute('aria-disabled') === 'true' ||
+            rect.width <= 0 || rect.height <= 0 || style.display === 'none' ||
+            style.visibility === 'hidden' || Number(style.opacity) === 0 || style.pointerEvents === 'none') continue;
+        const text = normalize(el.innerText || el.value || el.getAttribute('aria-label'));
+        if (!acceptance.test(text) || excluded.test(text)) continue;
+        // Use the closest meaningful container, so a footer Terms link cannot
+        // turn an unrelated Accept button elsewhere on the page into consent.
+        let context = el.parentElement;
+        while (context && context !== document.body && normalize(context.innerText).length < 25) context = context.parentElement;
+        const contextText = normalize(context?.innerText);
+        if (!legal.test(contextText) || excluded.test(contextText)) continue;
+        candidates.push({ el, text });
+      }
+      // Ambiguous controls are left for normal dispatch/recovery rather than
+      // choosing a potentially unrelated action by document order.
+      if (candidates.length !== 1) return null;
+      const { el, text } = candidates[0];
+      const id = `legal-acceptance-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+      el.setAttribute('data-crawler-legal-acceptance-id', id);
+      return { id, text };
+    });
+    if (!target) return { handled: false, advanced: false };
+    const consent = await handleRequiredPageConsentCheckboxes();
+    if (consent.found && !consent.active) return { handled: true, advanced: false };
+    const before = pageSignature(state);
+    console.log('Automatically accepting funnel Terms/Privacy:', target.text);
+    const clicked = await safeCrawlerClick(page.locator(`[data-crawler-legal-acceptance-id="${target.id}"]`), target.text);
+    if (!clicked) return { handled: true, advanced: false };
+    return { handled: true, advanced: await waitForAdvancement(before, 12000) };
+  }
+
   async function advanceOneScreen(state, screenNumber = null) {
+    const legalAcceptance = await handleLegalAcceptanceButton(state);
+    if (legalAcceptance.handled) return legalAcceptance.advanced;
     const handledEnglishLanguageChoice = await handleEnglishLanguageChoice();
     if (handledEnglishLanguageChoice) return true;
     if (isNativeLanguageQuestion(state.pageText)) {
