@@ -1,4 +1,4 @@
-const rejectionPattern = /^(?:reject(?: all| all cookies| cookies)?|decline(?: all| cookies)?|deny(?: all)?|refuse(?: all)?|no thanks|only necessary|necessary cookies only|use necessary cookies only|continue without accepting|tümünü reddet|hepsini reddet|reddet|yalnızca gerekli|sadece gerekli|tout refuser|refuser|alle ablehnen|ablehnen|rechazar todo|rechazar|recusar tudo|recusar|rifiuta tutto|rifiuta)$/i;
+const rejectionPattern = /^(?:reject(?: all| all cookies| cookies)?|disable (?:optional|non-essential) cookies|decline(?: all| cookies)?|deny(?: all)?|refuse(?: all)?|no thanks|only necessary|necessary cookies only|use necessary cookies only|continue without accepting|tümünü reddet|hepsini reddet|reddet|yalnızca gerekli|sadece gerekli|tout refuser|refuser|alle ablehnen|ablehnen|rechazar todo|rechazar|recusar tudo|recusar|rifiuta tutto|rifiuta)$/i;
 const cookieIdentityPattern = /cookie|kurabiye|onetrust|cookiebot|(?:^|[\s_-])cky(?:[\s_-]|$)/i;
 const cookieTextPattern = /\bcookies?\b|\bçerez(?:ler|leri)?\b|\bkurabiye\b/i;
 
