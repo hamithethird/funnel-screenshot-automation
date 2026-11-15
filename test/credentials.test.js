@@ -1,4 +1,7 @@
 process.env.CRAWLER_PASSWORD = 'fake-test-password-1';
+process.env.CRAWLER_EMAIL = 'primary@example.com';
+process.env.CRAWLER_NAME = 'Test User';
+process.env.CRAWLER_FALLBACK_EMAIL = 'backup@example.com';
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -6,8 +9,8 @@ const vm = require('node:vm');
 const {
   createRunCredentials, genericFormFieldType, isEmailRejection, redactCrawlerLog
 } = require('../funnel-crawler-multiscreen');
-const primary = 'REMOVED_EMAIL';
-const backup = 'REMOVED_EMAIL';
+const primary = process.env.CRAWLER_EMAIL;
+const backup = process.env.CRAWLER_FALLBACK_EMAIL;
 const password = 'fake-test-password-1';
 const source = fs.readFileSync(require.resolve('../funnel-crawler-multiscreen'), 'utf8');
 

@@ -6,8 +6,11 @@ const path = require('path');
 const crypto = require('crypto');
 
 const RUN_PASSWORD = process.env.CRAWLER_PASSWORD || '';
-const BASE_RUN_EMAIL = 'REMOVED_EMAIL';
-const FALLBACK_RUN_EMAIL = 'REMOVED_EMAIL';
+// Each user sets these as personal GitHub Codespaces secrets (Settings > Codespaces > Secrets).
+const BASE_RUN_EMAIL = (process.env.CRAWLER_EMAIL || '').trim();
+const RUN_NAME = (process.env.CRAWLER_NAME || '').trim();
+// Optional; unset by default, so an email collision stops the run instead of switching address.
+const FALLBACK_RUN_EMAIL = (process.env.CRAWLER_FALLBACK_EMAIL || '').trim();
 
 // Page text and Playwright errors can echo filled values. Redact all crawler logs.
 function redactCrawlerLog(...args) {
@@ -24,7 +27,7 @@ function createRunCredentials() {
   return {
     currentRunEmail: () => email,
     advanceRunEmail: () => {
-      if (email !== BASE_RUN_EMAIL) return null;
+      if (email !== BASE_RUN_EMAIL || !FALLBACK_RUN_EMAIL) return null;
       email = FALLBACK_RUN_EMAIL;
       return email;
     }
@@ -3072,7 +3075,7 @@ async function runCrawler() {
       if (semanticName?.id) {
         const input = page.locator(`[data-crawler-semantic-input-id="${semanticName.id}"]`);
         console.log('Detected name input from page intent.');
-        const written = await writeSemanticFormControl(input, 'Hami');
+        const written = await writeSemanticFormControl(input, RUN_NAME);
         if (!written) return { recognized: true, advanced: false };
         const agreementState = await handleRequiredAgreementCheckboxes(input);
         if (!agreementState.active) return { recognized: true, advanced: false };
@@ -3126,7 +3129,7 @@ async function runCrawler() {
       });
       const fieldType = genericFormFieldType(info, visibleFormIntent);
       const value = fieldType === 'password' ? RUN_PASSWORD :
-        fieldType === 'email' ? currentRunEmail() : fieldType === 'name' ? 'Hami' : null;
+        fieldType === 'email' ? currentRunEmail() : fieldType === 'name' ? RUN_NAME : null;
       if (!value) continue;
       console.log(`Detected ${fieldType} input.`);
       await input.fill(value);
@@ -5362,6 +5365,14 @@ async function runCrawler() {
   console.log('Crawler finished.');
 }
 
+function requireRunIdentity() {
+  const missing = [['CRAWLER_EMAIL', BASE_RUN_EMAIL], ['CRAWLER_NAME', RUN_NAME]].filter(([, value]) => !value).map(([key]) => key);
+  if (!missing.length) return;
+  globalThis.console.error('Missing ' + missing.join(' and ') + '. Add them as personal Codespaces secrets: GitHub > Settings > Codespaces > Secrets, then restart the codespace.');
+  process.exit(1);
+}
+
+if (require.main === module) requireRunIdentity();
 if (require.main === module) runCrawler().catch(error => {
   console.error(error);
   process.exitCode = 1;
