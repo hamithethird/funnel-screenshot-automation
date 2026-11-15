@@ -4769,7 +4769,7 @@ async function runCrawler() {
 
   async function handleOptionalMarketingPrompt(state) {
     if (!isOptionalMarketingPrompt(state)) return { handled: false, advanced: false };
-    const decline = page.getByText(/^(?:i don['’]t want to receive tips or updates|no(?:,? thanks)?|not now|skip|continue without (?:emails|updates|offers))$/i).first();
+    const decline = page.getByText(/^(?:i don['’]t want to receive tips or updates|no(?:,? thanks)?|not now|skip|i['’]?m not interested|not interested|continue without (?:emails|updates|offers))$/i).first();
     if (!(await decline.isVisible().catch(() => false))) {
       console.log('Optional email prompt detected, but no decline control was found. Leaving marketing unselected and stopping for review.');
       return { handled: true, advanced: false };
@@ -5367,6 +5367,7 @@ async function runCrawler() {
 
 function requireRunIdentity() {
   const missing = [['CRAWLER_EMAIL', BASE_RUN_EMAIL], ['CRAWLER_NAME', RUN_NAME]].filter(([, value]) => !value).map(([key]) => key);
+  if (!missing.length && RUN_NAME.includes('@')) missing.push('a real first name in CRAWLER_NAME (it currently looks like an email)');
   if (!missing.length) return;
   globalThis.console.error('Missing ' + missing.join(' and ') + '. Add them as personal Codespaces secrets: GitHub > Settings > Codespaces > Secrets, then restart the codespace.');
   process.exit(1);
