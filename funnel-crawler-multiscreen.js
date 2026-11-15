@@ -11,6 +11,7 @@ const BASE_RUN_EMAIL = (process.env.CRAWLER_EMAIL || '').trim();
 const RUN_NAME = (process.env.CRAWLER_NAME || '').trim();
 // Optional; unset by default, so an email collision stops the run instead of switching address.
 const FALLBACK_RUN_EMAIL = (process.env.CRAWLER_FALLBACK_EMAIL || '').trim();
+let consecutiveDuplicateSkips = 0;
 
 // Page text and Playwright errors can echo filled values. Redact all crawler logs.
 function redactCrawlerLog(...args) {
@@ -5277,6 +5278,15 @@ async function runCrawler() {
     }
     await prepareFullPageCapture();
     await page.screenshot({ path: filename, fullPage: true });
+    // A stalled step can photograph the same screen again; keep one copy and reuse its number.
+    const previousBaseline = path.join(OUTPUT_DIR, `${String(screenNumber - 1).padStart(2, '0')}.png`);
+    if (screenNumber > 1 && consecutiveDuplicateSkips < 3 && fs.existsSync(previousBaseline) &&
+        hashScreenshot(fs.readFileSync(previousBaseline)) === hashScreenshot(fs.readFileSync(filename))) {
+      fs.unlinkSync(filename);
+      consecutiveDuplicateSkips++;
+      console.log(`Skipped ${path.basename(filename)}: identical to ${path.basename(previousBaseline)}.`);
+      screenNumber--;
+    } else consecutiveDuplicateSkips = 0;
     registerBaseScreenshot(screenNumber, filename);
     currentNumberedCaptureSignature = pageSignature(state);
     console.log(`\nCaptured ${filename}`);
