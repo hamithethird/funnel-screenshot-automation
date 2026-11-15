@@ -5,13 +5,14 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const RUN_PASSWORD = '***REMOVED***';
+const RUN_PASSWORD = process.env.CRAWLER_PASSWORD || '';
 const BASE_RUN_EMAIL = 'REMOVED_EMAIL';
 const FALLBACK_RUN_EMAIL = 'REMOVED_EMAIL';
 
 // Page text and Playwright errors can echo filled values. Redact all crawler logs.
 function redactCrawlerLog(...args) {
-  return require('util').format(...args).split(RUN_PASSWORD).join('[REDACTED]');
+  const text = require('util').format(...args);
+  return RUN_PASSWORD ? text.split(RUN_PASSWORD).join('[REDACTED]') : text;
 }
 const console = {
   log: (...args) => globalThis.console.log(redactCrawlerLog(...args)),

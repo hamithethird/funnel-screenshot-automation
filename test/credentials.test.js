@@ -1,3 +1,4 @@
+process.env.CRAWLER_PASSWORD = 'fake-test-password-1';
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -7,7 +8,7 @@ const {
 } = require('../funnel-crawler-multiscreen');
 const primary = 'REMOVED_EMAIL';
 const backup = 'REMOVED_EMAIL';
-const password = '***REMOVED***';
+const password = 'fake-test-password-1';
 const source = fs.readFileSync(require.resolve('../funnel-crawler-multiscreen'), 'utf8');
 
 function internalFunction(name, nextName, context) {
