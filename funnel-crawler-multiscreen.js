@@ -1719,7 +1719,7 @@ async function runCrawler() {
       page.locator(`[data-crawler-answer-card-id="${marker}"]`),
       `answer card ${optionText}`
     );
-    if (!clicked) return false;
+    if (!clicked) return await waitForAdvancement(beforeSignature, 4000);
     return await waitForAdvancement(beforeSignature, 5000);
   }
 
@@ -4477,6 +4477,11 @@ async function runCrawler() {
         !stateStillLooksLikeAgeStep(afterSelection);
 
       if (actuallyLeftAgeStep) return { handled: true, advanced: true };
+      if (await waitForLeavingAgeStep(beforeUrl, beforePrompt, 3500)) {
+        console.log('Age step advanced after a delayed transition.');
+        return { handled: true, advanced: true };
+      }
+      afterSelection = await inspectPageNavigationSafe('age-range choice delayed check');
 
       const nav = await clickStrongNavigation(afterSelection, 'age-range selection navigation CTA');
       if (nav.handled) {
@@ -4770,7 +4775,7 @@ async function runCrawler() {
 
   async function handleOptionalMarketingPrompt(state) {
     if (!isOptionalMarketingPrompt(state)) return { handled: false, advanced: false };
-    const decline = page.getByText(/^(?:i don['’]t want to receive tips or updates|no(?:,? thanks)?|not now|skip|i['’]?m not interested|not interested|continue without (?:emails|updates|offers))$/i).first();
+    const decline = page.getByText(/^(?:i (?:don['’]t|do not) want (?:to receive )?(?:any )?(?:trading )?(?:tips|emails|updates)(?: (?:or|and) (?:updates|offers|emails))?|no(?:,? thanks)?|not now|skip|i['’]?m not interested|not interested|continue without (?:emails|updates|offers))$/i).first();
     if (!(await decline.isVisible().catch(() => false))) {
       console.log('Optional email prompt detected, but no decline control was found. Leaving marketing unselected and stopping for review.');
       return { handled: true, advanced: false };
